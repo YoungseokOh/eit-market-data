@@ -11,10 +11,8 @@ Agent instructions for working in this repository.
 ### 한줄 요약
 
 ```
-feat(scope): 한 일  |  fix(scope): 한 일
+<type>(<scope>): <subject>
 ```
-
-`feat`와 `fix` **두 가지 type만** 사용한다.
 
 ### 금지사항
 

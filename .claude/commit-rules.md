@@ -4,9 +4,12 @@
 
 ```
 <type>(<scope>): <subject>
+
+[optional body — Korean or English OK]
+[optional footer]
 ```
 
-- `type`: `feat` 또는 `fix` — **이 두 가지만 허용**
+- `type`: 아래 표에서 선택
 - `scope`: 선택사항, 변경 영역 명시
 - `subject`: 영어 소문자, 현재 시제, 마침표 없음
 
@@ -14,11 +17,12 @@
 
 | Type | 언제 사용 |
 |------|----------|
-| `feat` | 기능 추가, 데이터 추가, 스크립트 추가, 문서 추가, 의존성 추가 등 **새로 생기는 것** |
-| `fix` | 버그 수정, 잘못된 값 수정, 누락 수정 등 **고치는 것** |
-
-> `refactor`, `chore`, `docs`, `test` 등 다른 type은 사용하지 않는다.
-> 판단이 애매하면: 없던 것이 생기면 `feat`, 있던 것이 잘못된 거면 `fix`.
+| `feat` | 새로운 기능 추가 |
+| `fix` | 버그 수정 |
+| `refactor` | 동작 변경 없는 코드 개선 |
+| `docs` | 문서 변경 (코드 변경 없음) |
+| `chore` | 빌드 설정, 의존성, CI 등 |
+| `test` | 테스트 추가 또는 수정 |
 
 ## Scopes
 
@@ -44,7 +48,11 @@ feat(docs): add DART/ECOS API key setup guide
 fix(kr): move asyncio.Semaphore to __init__ to prevent event-loop errors
 fix(kr): correct EPS unit — use native KRW not KRW thousands
 fix(snapshot): pass as_of to fetch_sector_map to prevent look-ahead
-fix(kr): reorder total_debt candidates to prefer aggregate terms
+
+refactor(schema): rename EITConfig to SnapshotConfig
+docs: update README with KR provider setup instructions
+chore: add kr optional-dependencies to pyproject.toml
+test(kr): add unit tests for DartProvider account map
 ```
 
 ## Rules
