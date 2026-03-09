@@ -1,0 +1,36 @@
+ticker,market,sector,name
+005930,KOSPI,Technology,삼성전자
+000660,KOSPI,Technology,SK하이닉스
+373220,KOSPI,Industrials,LG에너지솔루션
+207940,KOSPI,Healthcare,삼성바이오로직스
+005380,KOSPI,Consumer Discretionary,현대차
+000270,KOSPI,Consumer Discretionary,기아
+068270,KOSPI,Healthcare,셀트리온
+105560,KOSPI,Financials,KB금융
+055550,KOSPI,Financials,신한지주
+086790,KOSPI,Financials,하나금융지주
+005490,KOSPI,Materials,POSCO홀딩스
+035420,KOSPI,Technology,NAVER
+035720,KOSPI,Technology,카카오
+051910,KOSPI,Materials,LG화학
+006400,KOSPI,Industrials,삼성SDI
+028260,KOSPI,Industrials,삼성물산
+096770,KOSPI,Energy,SK이노베이션
+066570,KOSPI,Technology,LG전자
+012330,KOSPI,Consumer Discretionary,현대모비스
+015760,KOSPI,Utilities,한국전력
+032830,KOSPI,Financials,삼성생명
+017670,KOSPI,Telecom,SK텔레콤
+030200,KOSPI,Telecom,KT
+090430,KOSPI,Consumer Staples,아모레퍼시픽
+010950,KOSPI,Energy,S-Oil
+247540,KOSDAQ,Materials,에코프로비엠
+086520,KOSDAQ,Materials,에코프로
+028300,KOSDAQ,Healthcare,HLB
+068760,KOSDAQ,Healthcare,셀트리온제약
+058470,KOSDAQ,Technology,리노공업
+240810,KOSDAQ,Technology,원익IPS
+196170,KOSDAQ,Healthcare,알테오젠
+145020,KOSDAQ,Healthcare,휴젤
+357780,KOSDAQ,Materials,솔브레인
+263750,KOSDAQ,Technology,펄어비스
