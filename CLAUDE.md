@@ -6,68 +6,21 @@ Agent instructions for working in this repository.
 
 ## Section 1: Commit Rules
 
-### Format
+규칙 전문: `.claude/commit-rules.md`
 
-모든 커밋은 [Conventional Commits](https://www.conventionalcommits.org/) 형식을 따른다.
-
-```
-<type>(<scope>): <short subject in English>
-
-[optional body — Korean or English OK]
-[optional footer]
-```
-
-### Types
-
-| Type | 사용 상황 |
-|------|----------|
-| `feat` | 새로운 기능 추가 |
-| `fix` | 버그 수정 |
-| `refactor` | 동작 변경 없는 코드 개선 |
-| `docs` | 문서 변경 (코드 변경 없음) |
-| `chore` | 빌드 설정, 의존성, CI 등 |
-| `test` | 테스트 추가 또는 수정 |
-
-### Scope 규칙
-
-| Scope | 대상 |
-|-------|------|
-| `kr` | `src/eit_market_data/kr/` 하위 모든 파일 |
-| `us` | `src/eit_market_data/` 하위 US 프로바이더 (yfinance, fred, edgar) |
-| `schema` | `src/eit_market_data/schemas/` |
-| `snapshot` | `src/eit_market_data/snapshot.py` |
-| `scripts` | `scripts/` |
-| `docs` | `docs/`, `README.md`, `CLAUDE.md` |
-
-Scope는 생략 가능하지만, 변경이 한 영역에 집중될 때는 반드시 명시한다.
-
-### 커밋 메시지 예시
+### 한줄 요약
 
 ```
-feat(kr): add EcosMacroProvider for Bank of Korea ECOS API
-
-한국은행 ECOS API를 통해 기준금리, M2, CPI 등 매크로 지표를 수집.
-ECOS_API_KEY 환경변수 필요.
+feat(scope): 한 일  |  fix(scope): 한 일
 ```
 
-```
-fix(snapshot): prevent look-ahead by clamping as_of to decision_date
-```
-
-```
-refactor(schema): rename EITConfig to SnapshotConfig
-```
-
-```
-chore: add kr optional-dependencies to pyproject.toml
-```
+`feat`와 `fix` **두 가지 type만** 사용한다.
 
 ### 금지사항
 
-- `git commit --no-verify` 사용 금지 — pre-commit 훅을 우회하지 않는다.
-- 빈 커밋 금지 (`--allow-empty` 사용 금지).
-- 테스트가 실패하는 상태로 커밋 금지. 최소한 `python -c "import eit_market_data"` 가 통과해야 한다.
-- 하나의 커밋에 scope가 다른 변경사항을 혼재시키지 않는다. 필요하면 커밋을 분리한다.
+- `git commit --no-verify` 사용 금지
+- 빈 커밋 금지
+- `python -c "import eit_market_data"` 통과 전 커밋 금지
 
 ---
 
