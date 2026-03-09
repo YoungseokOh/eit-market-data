@@ -162,7 +162,7 @@ class SnapshotBuilder:
         filing_tasks = {t: self.filing.fetch_filing(t, decision_date) for t in universe}
         news_tasks = {t: self.news.fetch_news(t, decision_date) for t in universe}
         macro_task = self.macro.fetch_macro(decision_date)
-        sector_map_task = self.sector.fetch_sector_map(universe)
+        sector_map_task = self.sector.fetch_sector_map(universe, as_of=decision_date)
         benchmark_task = self.benchmark.fetch_benchmark(decision_date)
 
         # Gather all per-stock data

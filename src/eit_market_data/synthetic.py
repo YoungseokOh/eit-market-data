@@ -460,7 +460,10 @@ class SyntheticProvider:
     async def fetch_macro(self, as_of: date) -> MacroData:
         return _generate_macro(as_of)
 
-    async def fetch_sector_map(self, universe: list[str]) -> dict[str, str]:
+    async def fetch_sector_map(
+        self, universe: list[str], as_of: date | None = None
+    ) -> dict[str, str]:
+        _ = as_of
         return {t: self._sector_map.get(t, "General") for t in universe}
 
     async def fetch_sector_averages(

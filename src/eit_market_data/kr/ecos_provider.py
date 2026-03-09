@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from datetime import date, timedelta
 from typing import Any
 
@@ -123,11 +124,17 @@ class EcosMacroProvider:
             f"{stat_code}/{period}/{start_date}/{end_date}/{item_code}"
         )
         try:
-            resp = self._requests.get(url, timeout=15)
-            if resp.status_code == 429:
-                import time
-                time.sleep(1)
+            resp = None
+            for attempt, backoff in enumerate([0, 1, 2, 4]):
+                if backoff:
+                    time.sleep(backoff)
                 resp = self._requests.get(url, timeout=15)
+                if resp.status_code != 429:
+                    break
+                logger.warning(
+                    "ECOS 429 rate limit (%s/%s), attempt %d/3",
+                    stat_code, item_code, attempt + 1,
+                )
             resp.raise_for_status()
             data = resp.json()
         except Exception as e:

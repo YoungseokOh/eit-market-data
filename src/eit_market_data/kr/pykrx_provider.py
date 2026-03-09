@@ -7,8 +7,6 @@ import logging
 from datetime import date, timedelta
 from typing import Any, Callable
 
-import numpy as np
-
 from eit_market_data.schemas.snapshot import (
     FundamentalData,
     NewsItem,
@@ -18,7 +16,6 @@ from eit_market_data.schemas.snapshot import (
 
 logger = logging.getLogger(__name__)
 
-_PYKRX_SEMAPHORE = asyncio.Semaphore(2)
 _PYKRX_DELAY_SECONDS = 0.5
 
 
@@ -53,11 +50,12 @@ class PykrxProvider:
             ) from e
         self._fundamental_provider = fundamental_provider
         self._fundamental_provider_init_failed = False
-        self._sector_cache: dict[str, str] = {}
+        self._sector_cache: dict[tuple[str, str], str] = {}
+        self._semaphore = asyncio.Semaphore(2)
 
     async def _run_limited(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         """Run a sync pykrx call in thread with concurrency/rate limits."""
-        async with _PYKRX_SEMAPHORE:
+        async with self._semaphore:
             try:
                 return await asyncio.to_thread(fn, *args, **kwargs)
             finally:
@@ -122,28 +120,29 @@ class PykrxProvider:
         """Fetch sector names for Korean universe from pykrx."""
         result: dict[str, str] = {}
         tickers = [_normalize_ticker(t) for t in universe]
+        effective_as_of = as_of or date.today()
+        date_str = date_to_yyyymmdd(effective_as_of)
 
-        unresolved = [t for t in tickers if t not in self._sector_cache]
+        unresolved = [t for t in tickers if (t, date_str) not in self._sector_cache]
         if unresolved:
-            as_of = as_of or date.today()
             kospi_map = await self._run_limited(
-                self._fetch_sector_classification_sync, "KOSPI", as_of
+                self._fetch_sector_classification_sync, "KOSPI", effective_as_of
             )
             for t in unresolved:
                 if t in kospi_map:
-                    self._sector_cache[t] = kospi_map[t]
+                    self._sector_cache[(t, date_str)] = kospi_map[t]
 
-            unresolved = [t for t in unresolved if t not in self._sector_cache]
+            unresolved = [t for t in unresolved if (t, date_str) not in self._sector_cache]
             if unresolved:
                 kosdaq_map = await self._run_limited(
-                    self._fetch_sector_classification_sync, "KOSDAQ", as_of
+                    self._fetch_sector_classification_sync, "KOSDAQ", effective_as_of
                 )
                 for t in unresolved:
                     if t in kosdaq_map:
-                        self._sector_cache[t] = kosdaq_map[t]
+                        self._sector_cache[(t, date_str)] = kosdaq_map[t]
 
         for raw, norm in zip(universe, tickers, strict=True):
-            result[raw] = self._sector_cache.get(norm, "General")
+            result[raw] = self._sector_cache.get((norm, date_str), "General")
 
         return result
 
@@ -181,6 +180,7 @@ class PykrxProvider:
         self, sector: str, tickers: list[str], as_of: date
     ) -> SectorAverages:
         """Compute sector average metrics from quarterly fundamentals."""
+        import numpy as np
         provider = self._fundamental_provider
         if provider is None and not self._fundamental_provider_init_failed:
             try:
@@ -328,9 +328,12 @@ def get_kr_universe(
         except Exception:
             pass
 
-    sorted_tickers = sorted(
-        [t for t in all_tickers if t in caps],
-        key=lambda t: caps.get(t, 0),
-        reverse=True,
-    )
+    filtered = [t for t in all_tickers if t in caps]
+    if not filtered:
+        logger.warning(
+            "get_kr_universe: market cap data unavailable, returning unsorted tickers"
+        )
+        return all_tickers[:top_n]
+
+    sorted_tickers = sorted(filtered, key=lambda t: caps.get(t, 0), reverse=True)
     return sorted_tickers[:top_n]

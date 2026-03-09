@@ -77,8 +77,10 @@ class MacroProvider(Protocol):
 class SectorProvider(Protocol):
     """Provides sector mapping and averages."""
 
-    async def fetch_sector_map(self, universe: list[str]) -> dict[str, str]:
-        """Return {ticker: sector_name} for the given universe."""
+    async def fetch_sector_map(
+        self, universe: list[str], as_of: date | None = None
+    ) -> dict[str, str]:
+        """Return {ticker: sector_name} for the given universe, as of the given date."""
         ...
 
     async def fetch_sector_averages(

@@ -13,8 +13,6 @@ from eit_market_data.schemas.snapshot import FilingData, FundamentalData, Quarte
 
 logger = logging.getLogger(__name__)
 
-_DART_SEMAPHORE = asyncio.Semaphore(2)
-
 _ACCOUNT_MAP: dict[str, list[str]] = {
     "revenue": ["매출액", "영업수익"],
     "operating_income": ["영업이익", "영업이익(손실)"],
@@ -25,7 +23,7 @@ _ACCOUNT_MAP: dict[str, list[str]] = {
     "current_assets": ["유동자산"],
     "current_liabilities": ["유동부채"],
     "gross_profit": ["매출총이익", "매출총손익"],
-    "total_debt": ["단기차입금", "차입금합계", "총차입금"],
+    "total_debt": ["차입금합계", "총차입금", "단기차입금"],
     "eps": ["주당순이익", "주당이익", "기본주당이익"],
     "interest_expense": ["이자비용"],
     "operating_cash_flow": ["영업활동현금흐름", "영업활동으로 인한 현금흐름"],
@@ -92,6 +90,27 @@ def _parse_amount_to_million(raw: Any) -> float | None:
     return round(value / 1000.0, 1)
 
 
+def _parse_eps(raw: Any) -> float | None:
+    """Parse DART EPS value in native KRW per share (no unit conversion)."""
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text or text in {"-", "N/A", "nan", "None"}:
+        return None
+    text = text.replace(",", "").replace(" ", "")
+    negative = False
+    if text.startswith("(") and text.endswith(")"):
+        negative = True
+        text = text[1:-1]
+    try:
+        value = float(text)
+    except ValueError:
+        return None
+    if negative:
+        value = -value
+    return round(value, 2)
+
+
 def _clean_document_text(raw: str) -> str:
     text = re.sub(r"<[^>]+>", "\n", raw)
     text = text.replace("&nbsp;", " ").replace("&#160;", " ").replace("&amp;", "&")
@@ -153,12 +172,13 @@ class DartProvider:
         self._dart = OpenDartReader.OpenDartReader(key)
         self._corp_cache: dict[str, str | None] = {}
         self._corp_list: Any = None
+        self._semaphore = asyncio.Semaphore(2)
 
     async def fetch_fundamentals(
         self, ticker: str, as_of: date, n_quarters: int = 8
     ) -> FundamentalData:
         norm_ticker = _normalize_ticker(ticker)
-        async with _DART_SEMAPHORE:
+        async with self._semaphore:
             try:
                 return await asyncio.to_thread(
                     self._fetch_fundamentals_sync, norm_ticker, as_of, n_quarters
@@ -169,7 +189,7 @@ class DartProvider:
 
     async def fetch_filing(self, ticker: str, as_of: date) -> FilingData:
         norm_ticker = _normalize_ticker(ticker)
-        async with _DART_SEMAPHORE:
+        async with self._semaphore:
             try:
                 return await asyncio.to_thread(self._fetch_filing_sync, norm_ticker, as_of)
             except Exception as e:
@@ -249,6 +269,28 @@ class DartProvider:
                     return val
         return None
 
+    def _pick_eps_value(self, df: Any) -> float | None:
+        """Pick EPS value using native KRW unit (no /1000 conversion)."""
+        if df is None or df.empty or "account_nm" not in df.columns:
+            return None
+
+        names = df["account_nm"].fillna("").astype(str).str.strip()
+        candidates = _ACCOUNT_MAP["eps"]
+        for candidate in candidates:
+            exact = df.loc[names == candidate]
+            if not exact.empty:
+                val = _parse_eps(exact.iloc[0].get("thstrm_amount"))
+                if val is not None:
+                    return val
+
+        for candidate in candidates:
+            partial = df.loc[names.str.contains(candidate, regex=False)]
+            if not partial.empty:
+                val = _parse_eps(partial.iloc[0].get("thstrm_amount"))
+                if val is not None:
+                    return val
+        return None
+
     def _quarter_candidates(self, as_of: date) -> list[tuple[str, date, str, str]]:
         candidates: list[tuple[str, date, str, str]] = []
         quarter_defs = [
@@ -304,7 +346,7 @@ class DartProvider:
                 ),
                 "gross_profit": self._pick_account_value(df_fin, _ACCOUNT_MAP["gross_profit"]),
                 "total_debt": self._pick_account_value(df_fin, _ACCOUNT_MAP["total_debt"]),
-                "eps": self._pick_account_value(df_fin, _ACCOUNT_MAP["eps"]),
+                "eps": self._pick_eps_value(df_fin),
                 "interest_expense": self._pick_account_value(
                     df_fin, _ACCOUNT_MAP["interest_expense"]
                 ),
