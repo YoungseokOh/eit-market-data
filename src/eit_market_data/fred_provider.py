@@ -33,7 +33,7 @@ _INFLATION_SERIES: dict[str, str] = {
     "CPIAUCSL": "cpi_index",           # CPI All Urban Consumers (index, we compute YoY)
     "PPIACO": "ppi_index",             # PPI All Commodities (index, we compute YoY)
     "DCOILWTICO": "oil_wti",           # WTI Crude Oil
-    "GOLDAMGBD228NLBM": "gold",        # Gold Fixing Price
+    # GOLDAMGBD228NLBM (LBMA gold fix) was retired from FRED; gold fetched via yfinance GC=F
     "PCOPPUSDM": "copper",             # Copper Price
 }
 
@@ -43,6 +43,7 @@ _GROWTH_SERIES: dict[str, str] = {
     "MANEMP": "ism_proxy",                  # Manufacturing Employment (ISM proxy)
     "UMCSENT": "consumer_confidence",       # U of Michigan Consumer Sentiment
     "PAYEMS": "nonfarm_payrolls",           # Total Nonfarm Payrolls (thousands)
+    # NAPM (ISM Manufacturing PMI) was discontinued; MANEMP used as proxy above
 }
 
 _MARKET_SERIES: dict[str, str] = {
@@ -216,11 +217,22 @@ class FredMacroProvider:
         if ppi_yoy is not None:
             inflation["ppi_yoy"] = ppi_yoy
 
-        for series_id in ("DCOILWTICO", "GOLDAMGBD228NLBM", "PCOPPUSDM"):
+        for series_id in ("DCOILWTICO", "PCOPPUSDM"):
             key = _INFLATION_SERIES[series_id]
             val = _latest_value(fred, series_id, as_of)
             if val is not None:
                 inflation[key] = val
+
+        # Gold: fetch via yfinance GC=F (LBMA series GOLDAMGBD228NLBM was retired from FRED)
+        try:
+            from eit_market_data.yfinance_provider import YFinanceProvider
+
+            yf_prov = YFinanceProvider()
+            gold_bars = yf_prov._fetch_prices_sync("GC=F", as_of, lookback_days=30)
+            if gold_bars:
+                inflation["gold"] = round(gold_bars[-1].close, 2)
+        except Exception as e:
+            logger.debug("Could not fetch gold price via yfinance: %s", e)
 
         # --- Growth & Economy ---
         growth: dict[str, object] = {}
@@ -237,10 +249,8 @@ class FredMacroProvider:
         if nfp is not None:
             growth["nonfarm_payrolls_k"] = nfp
 
-        # ISM Manufacturing (use NAPM or proxy)
-        ism = _latest_value(fred, "NAPM", as_of)
-        if ism is None:
-            ism = _latest_value(fred, "MANEMP", as_of)
+        # ISM Manufacturing proxy via MANEMP (NAPM was discontinued on FRED)
+        ism = _latest_value(fred, "MANEMP", as_of)
         if ism is not None:
             growth["ism_manufacturing"] = ism
 

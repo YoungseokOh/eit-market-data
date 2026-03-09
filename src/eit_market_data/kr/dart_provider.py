@@ -156,12 +156,16 @@ class DartProvider:
 
     def __init__(self, api_key: str | None = None) -> None:
         try:
-            import OpenDartReader
-        except ImportError as e:
-            raise ImportError(
-                "OpenDartReader is required for Korean filings/fundamentals. "
-                "Install with: pip install -e '.[kr]'"
-            ) from e
+            from OpenDartReader import OpenDartReader as _OpenDartReader
+        except ImportError:
+            try:
+                # Some OpenDartReader builds expose the class directly on import.
+                import OpenDartReader as _OpenDartReader  # type: ignore[no-redef]
+            except ImportError as e:
+                raise ImportError(
+                    "OpenDartReader is required for Korean filings/fundamentals. "
+                    "Install with: pip install -e '.[kr]'"
+                ) from e
 
         key = api_key or os.environ.get("DART_API_KEY", "")
         if not key:
@@ -169,7 +173,7 @@ class DartProvider:
                 "DART_API_KEY environment variable is required for DartProvider."
             )
 
-        self._dart = OpenDartReader.OpenDartReader(key)
+        self._dart = _OpenDartReader(key)
         self._corp_cache: dict[str, str | None] = {}
         self._corp_list: Any = None
         self._semaphore = asyncio.Semaphore(2)

@@ -180,6 +180,9 @@ def _strip_html(raw: str) -> str:
     soup = BeautifulSoup(raw, "html.parser")
     text = soup.get_text(separator="\n")
     text = html_module.unescape(text)
+    # Normalize non-breaking spaces (\xa0) to regular spaces so that
+    # section header patterns (e.g. "Item 1.\xa0\xa0\xa0\xa0Business") match correctly.
+    text = text.replace("\xa0", " ")
     # Collapse whitespace
     text = re.sub(r"\n{3,}", "\n\n", text)
     text = re.sub(r"[ \t]+", " ", text)
@@ -201,22 +204,30 @@ def _extract_sections(html_text: str, max_chars: int = 8000) -> dict[str, str]:
             if not matches:
                 continue
 
-            start = matches[0].end()
+            # Iterate all matches; the first one is often a Table of Contents entry
+            # with minimal content. Use the first match that yields substantial text.
+            best: str | None = None
+            for match in matches:
+                start = match.end()
 
-            # Find the next "Item N" header to determine section end
-            next_item = re.search(
-                r"\n\s*item\s*\d+[a-z]?[.\s]",
-                plain[start:],
-                re.IGNORECASE,
-            )
-            end = start + next_item.start() if next_item else min(start + max_chars, len(plain))
+                # Find the next "Item N" header to determine section end
+                next_item = re.search(
+                    r"\n\s*item\s*\d+[a-z]?[.\s]",
+                    plain[start:],
+                    re.IGNORECASE,
+                )
+                end = start + next_item.start() if next_item else min(start + max_chars, len(plain))
 
-            section_text = plain[start:end].strip()
-            if len(section_text) > max_chars:
-                section_text = section_text[:max_chars]
+                section_text = plain[start:end].strip()
+                if len(section_text) > max_chars:
+                    section_text = section_text[:max_chars]
 
-            if len(section_text) > 50:  # Skip trivially short extractions
-                sections[section_name] = section_text
+                if len(section_text) > 300:  # Skip trivially short extractions (e.g. TOC entries)
+                    best = section_text
+                    break
+
+            if best:
+                sections[section_name] = best
                 break
 
     return sections
