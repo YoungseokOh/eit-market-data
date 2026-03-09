@@ -38,3 +38,8 @@ Thumbs.db
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Tooling caches
+.ruff_cache/
+docs_cache/
+uv.lock

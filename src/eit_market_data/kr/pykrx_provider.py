@@ -7,6 +7,13 @@ import logging
 from datetime import date, timedelta
 from typing import Any, Callable
 
+from eit_market_data.kr.market_helpers import (
+    date_to_yyyymmdd,
+    fetch_index_ohlcv_frame,
+    fetch_live_sector_classification_map,
+    load_sector_snapshot_map,
+    normalize_ticker,
+)
 from eit_market_data.schemas.snapshot import (
     FundamentalData,
     NewsItem,
@@ -19,15 +26,9 @@ logger = logging.getLogger(__name__)
 _PYKRX_DELAY_SECONDS = 0.5
 
 
-def date_to_yyyymmdd(value: date) -> str:
-    """Convert date to pykrx format."""
-    return value.strftime("%Y%m%d")
-
-
 def _normalize_ticker(ticker: str) -> str:
     """Normalize ticker to 6-digit KRX stock code."""
-    digits = "".join(ch for ch in str(ticker) if ch.isdigit())
-    return digits.zfill(6) if digits else str(ticker)
+    return normalize_ticker(ticker)
 
 
 class PykrxProvider:
@@ -51,6 +52,7 @@ class PykrxProvider:
         self._fundamental_provider = fundamental_provider
         self._fundamental_provider_init_failed = False
         self._sector_cache: dict[tuple[str, str], str] = {}
+        self._logged_sector_snapshots: set[tuple[str, str]] = set()
         self._semaphore = asyncio.Semaphore(2)
 
     async def _run_limited(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
@@ -125,12 +127,36 @@ class PykrxProvider:
 
         unresolved = [t for t in tickers if (t, date_str) not in self._sector_cache]
         if unresolved:
-            kospi_map = await self._run_limited(
-                self._fetch_sector_classification_sync, "KOSPI", effective_as_of
-            )
-            for t in unresolved:
-                if t in kospi_map:
-                    self._sector_cache[(t, date_str)] = kospi_map[t]
+            for market in ("KOSPI", "KOSDAQ"):
+                snapshot_map, snapshot_path = load_sector_snapshot_map(
+                    market,
+                    effective_as_of,
+                    logger_=logger,
+                )
+                if snapshot_path is not None:
+                    snapshot_key = (market, snapshot_path.name)
+                    if snapshot_key not in self._logged_sector_snapshots:
+                        logger.warning(
+                            "Using cached sector snapshot %s for %s as of %s",
+                            snapshot_path.name,
+                            market,
+                            effective_as_of,
+                        )
+                        self._logged_sector_snapshots.add(snapshot_key)
+                for t in unresolved:
+                    if t in snapshot_map:
+                        self._sector_cache[(t, date_str)] = snapshot_map[t]
+                unresolved = [t for t in unresolved if (t, date_str) not in self._sector_cache]
+                if not unresolved:
+                    break
+
+            if unresolved:
+                kospi_map = await self._run_limited(
+                    self._fetch_sector_classification_sync, "KOSPI", effective_as_of
+                )
+                for t in unresolved:
+                    if t in kospi_map:
+                        self._sector_cache[(t, date_str)] = kospi_map[t]
 
             unresolved = [t for t in unresolved if (t, date_str) not in self._sector_cache]
             if unresolved:
@@ -147,34 +173,12 @@ class PykrxProvider:
         return result
 
     def _fetch_sector_classification_sync(self, market: str, as_of: date) -> dict[str, str]:
-        from pykrx import stock
-
-        for offset in range(8):
-            query_day = as_of - timedelta(days=offset)
-            query_str = date_to_yyyymmdd(query_day)
-            try:
-                df = stock.get_market_sector_classifications(query_str, market=market)
-            except Exception:
-                continue
-
-            if df is None or df.empty:
-                continue
-
-            frame = df.reset_index() if "종목코드" not in df.columns else df
-            if "종목코드" not in frame.columns or "업종명" not in frame.columns:
-                continue
-
-            sector_map: dict[str, str] = {}
-            for _, row in frame.iterrows():
-                code = _normalize_ticker(str(row.get("종목코드", "")).strip())
-                if not code:
-                    continue
-                sector_name = str(row.get("업종명", "")).strip() or "General"
-                sector_map[code] = sector_name
-            if sector_map:
-                return sector_map
-
-        return {}
+        sector_map, _query_day = fetch_live_sector_classification_map(
+            market,
+            as_of,
+            logger_=logger,
+        )
+        return sector_map
 
     async def fetch_sector_averages(
         self, sector: str, tickers: list[str], as_of: date
@@ -253,16 +257,16 @@ class PykrxProvider:
             return []
 
     def _fetch_benchmark_sync(self, as_of: date, lookback_days: int) -> list[PriceBar]:
-        from pykrx import stock
-
         start = as_of - timedelta(days=max(int(lookback_days * 1.8), 30))
-        df = stock.get_index_ohlcv_by_date(
-            date_to_yyyymmdd(start),
-            date_to_yyyymmdd(as_of),
-            "1001",
-        )
+        df, _source = fetch_index_ohlcv_frame("1001", start, as_of, logger_=logger)
         if df is None or df.empty:
             return []
+
+        open_col = "시가" if "시가" in df.columns else "Open"
+        high_col = "고가" if "고가" in df.columns else "High"
+        low_col = "저가" if "저가" in df.columns else "Low"
+        close_col = "종가" if "종가" in df.columns else "Close"
+        volume_col = "거래량" if "거래량" in df.columns else "Volume"
 
         bars: list[PriceBar] = []
         for idx, row in df.iterrows():
@@ -272,11 +276,11 @@ class PykrxProvider:
             bars.append(
                 PriceBar(
                     date=bar_date,
-                    open=round(float(row.get("시가", 0) or 0), 2),
-                    high=round(float(row.get("고가", 0) or 0), 2),
-                    low=round(float(row.get("저가", 0) or 0), 2),
-                    close=round(float(row.get("종가", 0) or 0), 2),
-                    volume=float(row.get("거래량", 0) or 0),
+                    open=round(float(row.get(open_col, 0) or 0), 2),
+                    high=round(float(row.get(high_col, 0) or 0), 2),
+                    low=round(float(row.get(low_col, 0) or 0), 2),
+                    close=round(float(row.get(close_col, 0) or 0), 2),
+                    volume=float(row.get(volume_col, 0) or 0),
                 )
             )
         return bars[-lookback_days:]

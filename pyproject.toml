@@ -24,8 +24,11 @@ real-data = [
 ]
 kr = [
     "pykrx>=1.0.47",
-    "opendartreader>=0.7",
+    "opendartreader>=0.2.3",
+    "finance-datareader",
+    "pyarrow",
     "requests>=2.31",
+    "setuptools<82",
 ]
 all = [
     "yfinance>=0.2.36",
@@ -33,8 +36,11 @@ all = [
     "httpx>=0.27",
     "beautifulsoup4>=4.12",
     "pykrx>=1.0.47",
-    "opendartreader>=0.7",
+    "opendartreader>=0.2.3",
+    "finance-datareader",
+    "pyarrow",
     "requests>=2.31",
+    "setuptools<82",
 ]
 dev = [
     "pytest>=8.0",

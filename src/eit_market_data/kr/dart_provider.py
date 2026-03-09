@@ -206,7 +206,12 @@ class DartProvider:
 
     def _get_corp_list(self):  # noqa: ANN202
         if self._corp_list is None:
-            self._corp_list = self._dart.corp_code
+            corp_list = getattr(self._dart, "corp_codes", None)
+            if corp_list is None:
+                corp_list = getattr(self._dart, "corp_code", None)
+            if callable(corp_list):
+                corp_list = corp_list()
+            self._corp_list = corp_list
         return self._corp_list
 
     def _ticker_to_corp_code(self, ticker: str) -> str | None:
@@ -214,6 +219,13 @@ class DartProvider:
             return self._corp_cache[ticker]
 
         try:
+            finder = getattr(self._dart, "find_corp_code", None)
+            if callable(finder):
+                corp_code = str(finder(ticker) or "").strip()
+                if corp_code:
+                    self._corp_cache[ticker] = corp_code
+                    return corp_code
+
             corp_list = self._get_corp_list()
             if corp_list is None or corp_list.empty:
                 self._corp_cache[ticker] = None

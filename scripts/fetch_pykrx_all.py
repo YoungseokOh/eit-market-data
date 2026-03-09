@@ -26,14 +26,20 @@ import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SRC_ROOT = PROJECT_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
+from eit_market_data.kr.market_helpers import (
+    INDEX_CODE_NAMES,
+    fetch_index_ohlcv_frame,
+)
+
 logger = logging.getLogger(__name__)
 
 MARKETS = ["KOSPI", "KOSDAQ"]
-INDEX_CODES = {
-    "1001": "KOSPI",
-    "2001": "KOSDAQ",
-    "1028": "KOSPI200",
-}
+INDEX_CODES = INDEX_CODE_NAMES
 DELAY = 0.3  # seconds between pykrx calls to avoid rate limiting
 
 
@@ -139,10 +145,14 @@ def fetch_index_data(stock, start: date, end: date, out: Path) -> None:
     start_str, end_str = _yyyymmdd(start), _yyyymmdd(end)
 
     for code, name in INDEX_CODES.items():
-        df_ohlcv = _call(stock.get_index_ohlcv, start_str, end_str, code)
+        df_ohlcv, source = fetch_index_ohlcv_frame(code, start, end, logger_=logger)
+        if source:
+            logger.info("index OHLCV [%s] source=%s", name, source)
         _save_parquet(df_ohlcv, out / f"index/ohlcv/{name}_{end_str}.parquet")
 
         df_fund = _call(stock.get_index_fundamental, start_str, end_str, code)
+        if df_fund is None or df_fund.empty:
+            logger.warning("index fundamental unavailable for %s (%s)", name, code)
         _save_parquet(df_fund, out / f"index/fundamental/{name}_{end_str}.parquet")
 
 
