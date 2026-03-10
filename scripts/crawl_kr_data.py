@@ -1,9 +1,11 @@
+# ruff: noqa: E402
 from __future__ import annotations
 
+import argparse
 import time
 import sys
 import warnings
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import pandas as pd
@@ -17,6 +19,10 @@ if str(SRC_ROOT) not in sys.path:
 from eit_market_data.kr.market_helpers import (
     INDEX_CODE_NAMES,
     fetch_index_ohlcv_frame,
+)
+from eit_market_data.kr.krx_auth import (
+    ensure_krx_authenticated_session,
+    install_pykrx_krx_session_hooks,
 )
 
 DELAY = 0.3
@@ -32,6 +38,19 @@ INDEX_CODES = INDEX_CODE_NAMES
 
 def _parse_yyyymmdd(raw: str) -> datetime:
     return datetime.strptime(raw, "%Y%m%d")
+
+
+def _resolve_runtime_dates(
+    as_of_raw: str | None,
+    start_raw: str | None,
+    end_raw: str | None,
+    sector_date_raw: str | None,
+) -> tuple[str, str, str]:
+    as_of = date.fromisoformat(as_of_raw) if as_of_raw else date.today()
+    start = start_raw or f"{as_of.year}0101"
+    end = end_raw or as_of.strftime("%Y%m%d")
+    sector_date = sector_date_raw or end
+    return start, end, sector_date
 
 
 def safe_call(fn, *args, **kwargs):
@@ -87,13 +106,8 @@ def get_month_end_business_days(fallback_ticker: str) -> list[tuple[str, str]]:
         out = _month_ends_from_df(idx_df)
     else:
         warnings.warn(
-            f"Failed to compute month-end business days from index data. "
-            f"Fallback to ticker OHLCV: {fallback_ticker}"
+            "Failed to compute month-end business days from official KOSPI index data."
         )
-        tdf = safe_call(stock.get_market_ohlcv, START, END, fallback_ticker)
-        if tdf is not None and not tdf.empty:
-            out = _month_ends_from_df(tdf)
-            source_label = f"ticker:{fallback_ticker}"
 
     for yyyymm, yyyymmdd in out:
         print(f"[INFO] month-end business day ({source_label}): {yyyymm} -> {yyyymmdd}")
@@ -128,6 +142,7 @@ def fetch_fundamental(month_days: list[tuple[str, str]]) -> None:
 
 def fetch_index_ohlcv() -> None:
     print("[STEP] 4) Fetching index OHLCV")
+    filename_suffix = END[:4] if START[:4] == END[:4] else f"{START}_{END}"
     for code, name in INDEX_CODES.items():
         print(f"[INDEX] {name} ({code})")
         df, source = fetch_index_ohlcv_frame(
@@ -137,7 +152,7 @@ def fetch_index_ohlcv() -> None:
         )
         if source:
             print(f"[INFO] index source={source}")
-        save_parquet(df, OUTPUT_ROOT / f"index/ohlcv/{name}_2024.parquet")
+        save_parquet(df, OUTPUT_ROOT / f"index/ohlcv/{name}_{filename_suffix}.parquet")
 
 
 def fetch_sector_classification() -> None:
@@ -156,6 +171,44 @@ def fetch_sector_classification() -> None:
 
 
 def main() -> None:
+    global START, END, SECTOR_DATE, UNIVERSE_CSV, OUTPUT_ROOT
+
+    parser = argparse.ArgumentParser(
+        description="Fetch KR market data into parquet files."
+    )
+    parser.add_argument(
+        "--as-of",
+        help="Reference date in YYYY-MM-DD. Used to derive default start/end/sector dates.",
+    )
+    parser.add_argument("--start", help="Start date in YYYYMMDD format.")
+    parser.add_argument("--end", help="End date in YYYYMMDD format.")
+    parser.add_argument(
+        "--sector-date",
+        help="Sector snapshot date in YYYYMMDD format. Defaults to end date.",
+    )
+    parser.add_argument(
+        "--universe-csv",
+        default=str(UNIVERSE_CSV),
+        help="Universe CSV path.",
+    )
+    parser.add_argument(
+        "--output-root",
+        default=str(OUTPUT_ROOT),
+        help="Output directory for parquet artifacts.",
+    )
+    args = parser.parse_args()
+
+    START, END, SECTOR_DATE = _resolve_runtime_dates(
+        args.as_of,
+        args.start,
+        args.end,
+        args.sector_date,
+    )
+    UNIVERSE_CSV = Path(args.universe_csv)
+    OUTPUT_ROOT = Path(args.output_root)
+    install_pykrx_krx_session_hooks()
+    ensure_krx_authenticated_session(interactive=False)
+
     tickers = load_universe_tickers(UNIVERSE_CSV)
     month_days = get_month_end_business_days(tickers[0])
 

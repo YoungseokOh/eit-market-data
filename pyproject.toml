@@ -23,10 +23,11 @@ real-data = [
     "beautifulsoup4>=4.12",
 ]
 kr = [
-    "pykrx>=1.0.47",
+    "pykrx>=1.2.4",
     "opendartreader>=0.2.3",
     "finance-datareader",
     "pyarrow",
+    "playwright>=1.50",
     "requests>=2.31",
     "setuptools<82",
 ]
@@ -35,10 +36,11 @@ all = [
     "fredapi>=0.5.2",
     "httpx>=0.27",
     "beautifulsoup4>=4.12",
-    "pykrx>=1.0.47",
+    "pykrx>=1.2.4",
     "opendartreader>=0.2.3",
     "finance-datareader",
     "pyarrow",
+    "playwright>=1.50",
     "requests>=2.31",
     "setuptools<82",
 ]

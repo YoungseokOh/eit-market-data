@@ -7,6 +7,12 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from eit_market_data.kr.krx_auth import (
+    KrxAuthRequired,
+    ensure_krx_authenticated_session,
+    install_pykrx_krx_session_hooks,
+)
+
 logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -23,6 +29,8 @@ INDEX_CODE_SYMBOLS: dict[str, str] = {
     "2001": "YAHOO:^KQ11",
     "1028": "YAHOO:^KS200",
 }
+
+_NON_AUTHORITATIVE_SECTOR_COLUMNS = {"Industry", "ListingDate"}
 
 
 def date_to_yyyymmdd(value: date) -> str:
@@ -41,67 +49,114 @@ def fetch_index_ohlcv_frame(
     start: date,
     end: date,
     logger_: logging.Logger | None = None,
+    official_only: bool = True,
 ) -> tuple[Any | None, str]:
-    """Fetch index OHLCV, falling back to Yahoo data when pykrx is broken."""
+    """Fetch index OHLCV from the official pykrx KRX path."""
     active_logger = logger_ or logger
-    pykrx_error: Exception | None = None
 
     try:
         from pykrx import stock
+
+        install_pykrx_krx_session_hooks()
+        ensure_krx_authenticated_session(interactive=False)
 
         try:
             df = stock.get_index_ohlcv_by_date(
                 date_to_yyyymmdd(start),
                 date_to_yyyymmdd(end),
                 index_code,
+                name_display=False,
             )
         except Exception as exc:
-            pykrx_error = exc
+            active_logger.warning("Index %s fetch failed in pykrx: %s", index_code, exc)
             df = None
 
         if df is not None and not df.empty:
+            df.columns.name = INDEX_CODE_NAMES.get(index_code, index_code)
             return df, "pykrx"
     except ImportError:
-        pass
-
-    symbol = INDEX_CODE_SYMBOLS.get(index_code)
-    if not symbol:
-        if pykrx_error is not None:
-            active_logger.warning("Index %s fetch failed in pykrx: %s", index_code, pykrx_error)
         return None, ""
 
+    if not official_only:
+        active_logger.warning(
+            "Index %s official fetch returned empty; Yahoo fallback is disabled",
+            index_code,
+        )
+
+    return None, ""
+
+
+def fetch_market_ticker_list(as_of: date, market: str) -> list[str]:
+    """Fetch market ticker list through the authenticated KRX path."""
+    from pykrx import stock
+
+    install_pykrx_krx_session_hooks()
+    ensure_krx_authenticated_session(interactive=False)
+    return stock.get_market_ticker_list(date_to_yyyymmdd(as_of), market=market)
+
+
+def fetch_market_cap_frame(as_of: date, market: str) -> Any | None:
+    """Fetch market-cap snapshot through the authenticated KRX path."""
+    from pykrx import stock
+
+    install_pykrx_krx_session_hooks()
+    ensure_krx_authenticated_session(interactive=False)
+    df = stock.get_market_cap(date_to_yyyymmdd(as_of), market=market)
+    if df is None or df.empty:
+        return None
+    expected = {"종가", "시가총액", "거래량", "거래대금"}
+    if not expected.issubset(set(df.columns)):
+        raise KrxAuthRequired(
+            f"KRX market cap returned unexpected columns for {market}: {list(df.columns)}"
+        )
+    return df
+
+
+def fetch_market_fundamental_frame(as_of: date, market: str) -> Any | None:
+    """Fetch market fundamental snapshot through the authenticated KRX path."""
+    from pykrx import stock
+
+    install_pykrx_krx_session_hooks()
+    ensure_krx_authenticated_session(interactive=False)
+    df = stock.get_market_fundamental(date_to_yyyymmdd(as_of), market=market)
+    if df is None or df.empty:
+        return None
+    expected = {"BPS", "PER", "PBR", "EPS", "DIV", "DPS"}
+    if not expected.issubset(set(df.columns)):
+        raise KrxAuthRequired(
+            f"KRX fundamental returned unexpected columns for {market}: {list(df.columns)}"
+        )
+    return df
+
+
+def latest_krx_trading_day(
+    ticker: str,
+    as_of: date,
+    lookback_days: int = 14,
+) -> date | None:
+    """Return the most recent trading day with OHLCV on or before ``as_of``."""
     try:
-        import FinanceDataReader as fdr
+        from pykrx import stock
 
-        df = fdr.DataReader(symbol, start.isoformat(), end.isoformat())
-    except Exception as exc:
-        if pykrx_error is not None:
-            active_logger.warning(
-                "Index %s fetch failed in pykrx (%s) and Yahoo fallback (%s)",
-                index_code,
-                pykrx_error,
-                exc,
-            )
-        else:
-            active_logger.warning("Index %s Yahoo fallback failed: %s", index_code, exc)
-        return None, ""
+        install_pykrx_krx_session_hooks()
+    except ImportError:
+        return None
+
+    start = as_of - timedelta(days=max(lookback_days, 5))
+    try:
+        df = stock.get_market_ohlcv_by_date(
+            date_to_yyyymmdd(start),
+            date_to_yyyymmdd(as_of),
+            normalize_ticker(ticker),
+        )
+    except Exception:
+        return None
 
     if df is None or df.empty:
-        if pykrx_error is not None:
-            active_logger.warning(
-                "Index %s pykrx fetch failed (%s) and Yahoo fallback returned empty",
-                index_code,
-                pykrx_error,
-            )
-        return None, ""
+        return None
 
-    if pykrx_error is not None:
-        active_logger.warning(
-            "Index %s pykrx fetch failed (%s); using Yahoo fallback",
-            index_code,
-            pykrx_error,
-        )
-    return df, f"yahoo:{symbol}"
+    last_idx = df.index[-1]
+    return last_idx.date() if hasattr(last_idx, "date") else None
 
 
 def fetch_live_sector_classification_map(
@@ -116,6 +171,9 @@ def fetch_live_sector_classification_map(
 
     try:
         from pykrx import stock
+
+        install_pykrx_krx_session_hooks()
+        ensure_krx_authenticated_session(interactive=False)
     except ImportError:
         return {}, None
 
@@ -124,6 +182,9 @@ def fetch_live_sector_classification_map(
         query_str = date_to_yyyymmdd(query_day)
         try:
             df = stock.get_market_sector_classifications(query_str, market=market)
+        except KrxAuthRequired as exc:
+            last_error = exc
+            break
         except Exception as exc:
             last_error = exc
             continue
@@ -161,6 +222,7 @@ def load_sector_snapshot_map(
     as_of: date,
     logger_: logging.Logger | None = None,
     snapshot_dir: Path = SECTOR_SNAPSHOT_DIR,
+    official_only: bool = True,
 ) -> tuple[dict[str, str], Path | None]:
     """Load the latest cached sector snapshot on or before the requested date."""
     active_logger = logger_ or logger
@@ -183,14 +245,25 @@ def load_sector_snapshot_map(
         try:
             df = pd.read_parquet(path)
         except Exception as exc:
-            active_logger.warning("Failed to read sector snapshot %s: %s", path.name, exc)
+            active_logger.warning(
+                "Failed to read sector snapshot %s: %s", path.name, exc
+            )
             continue
 
         if df is None or df.empty:
             continue
 
-        frame = df.reset_index(drop=True)
+        frame = df.reset_index() if "종목코드" not in df.columns else df
         if "종목코드" not in frame.columns or "업종명" not in frame.columns:
+            continue
+
+        if official_only and any(
+            col in frame.columns for col in _NON_AUTHORITATIVE_SECTOR_COLUMNS
+        ):
+            active_logger.warning(
+                "Skipping non-authoritative sector snapshot %s in official-only mode",
+                path.name,
+            )
             continue
 
         sector_map: dict[str, str] = {}

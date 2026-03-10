@@ -1,3 +1,4 @@
+# ruff: noqa: E402
 """Fetch all available pykrx data for a given date range and save locally.
 
 Usage:
@@ -34,6 +35,10 @@ if str(SRC_ROOT) not in sys.path:
 from eit_market_data.kr.market_helpers import (
     INDEX_CODE_NAMES,
     fetch_index_ohlcv_frame,
+)
+from eit_market_data.kr.krx_auth import (
+    ensure_krx_authenticated_session,
+    install_pykrx_krx_session_hooks,
 )
 
 logger = logging.getLogger(__name__)
@@ -85,6 +90,7 @@ def _call(fn, *args, **kwargs):
 # Fetchers
 # ---------------------------------------------------------------------------
 
+
 def fetch_market_ohlcv(stock, start: date, end: date, out: Path, market: str) -> None:
     """Fetch OHLCV for all tickers in a market."""
     date_str = _yyyymmdd(end)
@@ -109,15 +115,21 @@ def fetch_market_fundamental(stock, as_of: date, out: Path, market: str) -> None
     _save_parquet(df, out / f"market/fundamental/{market}_{_yyyymmdd(as_of)}.parquet")
 
 
-def fetch_investor_trading(stock, start: date, end: date, out: Path, market: str) -> None:
+def fetch_investor_trading(
+    stock, start: date, end: date, out: Path, market: str
+) -> None:
     start_str, end_str = _yyyymmdd(start), _yyyymmdd(end)
 
     # By date (aggregate for all tickers)
     df_val = _call(stock.get_market_trading_value_by_date, start_str, end_str, market)
-    _save_parquet(df_val, out / f"market/investor/{market}_value_by_date_{end_str}.parquet")
+    _save_parquet(
+        df_val, out / f"market/investor/{market}_value_by_date_{end_str}.parquet"
+    )
 
     df_vol = _call(stock.get_market_trading_volume_by_date, start_str, end_str, market)
-    _save_parquet(df_vol, out / f"market/investor/{market}_volume_by_date_{end_str}.parquet")
+    _save_parquet(
+        df_vol, out / f"market/investor/{market}_volume_by_date_{end_str}.parquet"
+    )
 
 
 def fetch_shorting(stock, start: date, end: date, out: Path, market: str) -> None:
@@ -134,18 +146,28 @@ def fetch_shorting(stock, start: date, end: date, out: Path, market: str) -> Non
 
     # Top 50 by volume
     df_top = _call(stock.get_shorting_volume_top50, date_str, market=market)
-    _save_parquet(df_top, out / f"market/shorting/{market}_top50_volume_{date_str}.parquet")
+    _save_parquet(
+        df_top, out / f"market/shorting/{market}_top50_volume_{date_str}.parquet"
+    )
 
     # Top 50 by balance
     df_top_bal = _call(stock.get_shorting_balance_top50, date_str, market=market)
-    _save_parquet(df_top_bal, out / f"market/shorting/{market}_top50_balance_{date_str}.parquet")
+    _save_parquet(
+        df_top_bal, out / f"market/shorting/{market}_top50_balance_{date_str}.parquet"
+    )
 
 
 def fetch_index_data(stock, start: date, end: date, out: Path) -> None:
     start_str, end_str = _yyyymmdd(start), _yyyymmdd(end)
 
     for code, name in INDEX_CODES.items():
-        df_ohlcv, source = fetch_index_ohlcv_frame(code, start, end, logger_=logger)
+        df_ohlcv, source = fetch_index_ohlcv_frame(
+            code,
+            start,
+            end,
+            logger_=logger,
+            official_only=True,
+        )
         if source:
             logger.info("index OHLCV [%s] source=%s", name, source)
         _save_parquet(df_ohlcv, out / f"index/ohlcv/{name}_{end_str}.parquet")
@@ -184,13 +206,18 @@ def fetch_ticker_meta(stock, as_of: date, out: Path) -> None:
 
 
 def fetch_foreign_exhaustion(stock, as_of: date, out: Path, market: str) -> None:
-    df = _call(stock.get_exhaustion_rates_of_foreign_investment, _yyyymmdd(as_of), market=market)
+    df = _call(
+        stock.get_exhaustion_rates_of_foreign_investment,
+        _yyyymmdd(as_of),
+        market=market,
+    )
     _save_parquet(df, out / f"market/foreign/{market}_{_yyyymmdd(as_of)}.parquet")
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def run(start: date, end: date, out: Path, markets: list[str], skip: list[str]) -> None:
     try:
@@ -201,6 +228,8 @@ def run(start: date, end: date, out: Path, markets: list[str], skip: list[str]) 
 
     out.mkdir(parents=True, exist_ok=True)
     logger.info("Fetching pykrx data: %s to %s → %s", start, end, out)
+    install_pykrx_krx_session_hooks()
+    ensure_krx_authenticated_session(interactive=False)
 
     # Meta first (fast, needed for downstream)
     if "meta" not in skip:
@@ -244,19 +273,32 @@ def run(start: date, end: date, out: Path, markets: list[str], skip: list[str]) 
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Fetch all pykrx data and save locally.")
-    parser.add_argument("--date", help="Single date (YYYY-MM-DD). Sets both start and end.")
+    parser = argparse.ArgumentParser(
+        description="Fetch all pykrx data and save locally."
+    )
+    parser.add_argument(
+        "--date", help="Single date (YYYY-MM-DD). Sets both start and end."
+    )
     parser.add_argument("--start", help="Start date (YYYY-MM-DD)")
     parser.add_argument("--end", help="End date (YYYY-MM-DD)")
-    parser.add_argument("--output", default="data", help="Output root directory (default: data/)")
-    parser.add_argument("--markets", nargs="+", default=MARKETS, help="Markets to fetch")
+    parser.add_argument(
+        "--output", default="data", help="Output root directory (default: data/)"
+    )
+    parser.add_argument(
+        "--markets", nargs="+", default=MARKETS, help="Markets to fetch"
+    )
     parser.add_argument(
         "--skip",
         nargs="*",
         default=[],
         help="Data categories to skip: meta ohlcv cap fundamental investor shorting foreign index etf",
     )
-    parser.add_argument("--lookback", type=int, default=300, help="Lookback days when --date used (default: 300 = 12mo momentum + buffer)")
+    parser.add_argument(
+        "--lookback",
+        type=int,
+        default=300,
+        help="Lookback days when --date used (default: 300 = 12mo momentum + buffer)",
+    )
     parser.add_argument("--verbose", action="store_true")
 
     args = parser.parse_args()

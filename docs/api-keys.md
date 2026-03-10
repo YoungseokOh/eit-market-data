@@ -52,6 +52,36 @@ https://opendart.fss.or.kr/uss/umt/EgovMberInsertView.do
 
 ---
 
+## KRX 로그인 세션 (`KRX Data Marketplace`)
+
+KRX 지수/시장 전체 데이터는 더 이상 API 키가 아니라 **브라우저 로그인 세션**이 필요합니다.
+
+이 프로젝트는 로컬/WSL 기준으로 아래 스크립트로 KRX 세션 쿠키를 생성합니다:
+
+```bash
+python scripts/krx_login.py
+```
+
+기본 쿠키 파일:
+
+```text
+~/.cache/eit-market-data/krx-profile/cookies.json
+```
+
+동작 방식:
+
+- Chromium 브라우저가 열리면 KRX Data Marketplace에 직접 로그인
+- 로그인 완료 후 `JSESSIONID` 등 세션 쿠키를 JSON으로 저장
+- 이후 `preflight`, `crawl`, `fetch_pykrx_all`은 이 쿠키를 재사용
+
+주의사항:
+
+- 이 세션은 KRX 로그인 만료 정책에 따라 다시 갱신이 필요할 수 있음
+- 쿠키 파일은 비밀정보이므로 외부 공유 금지
+- 현재 1차 구현은 로컬/WSL 우선이며, GitHub Actions 무인 로그인은 범위 밖
+
+---
+
 ## 환경변수 설정
 
 프로젝트 루트에 `.env` 파일 생성:
@@ -75,6 +105,19 @@ load_dotenv()
 ```
 
 `.env` 파일은 반드시 `.gitignore`에 포함시킬 것.
+
+## GitHub Actions Secrets
+
+GitHub Actions로 자동 실행할 때는 `.env` 파일을 업로드하지 말고 repository secrets에 아래 이름으로 저장:
+
+```text
+DART_API_KEY
+ECOS_API_KEY
+FRED_API_KEY
+SEC_EDGAR_USER_AGENT
+```
+
+현재 일일 배치(`scripts/run_daily_batch.py`)는 KR preflight, KR crawl, KR snapshot 기준이라서 실제 필수 secret은 `DART_API_KEY`, `ECOS_API_KEY`다. `FRED_API_KEY`, `SEC_EDGAR_USER_AGENT`는 향후 US provider 자동화에 대비한 이름으로 유지한다.
 
 ---
 

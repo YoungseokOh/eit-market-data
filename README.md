@@ -16,7 +16,20 @@ pip install -e '.[all,dev]'
 
 ## KR Preflight
 
-After a reboot or WSL2 network change, run:
+KRX 공식 지수/시장 데이터는 2026년 KRX Data Marketplace 로그인 정책 변경 이후
+브라우저 로그인 세션이 필요합니다. 먼저 로컬에서 한 번 로그인 세션을 생성하세요:
+
+```bash
+python scripts/krx_login.py
+```
+
+기본 쿠키 저장 위치:
+
+```text
+~/.cache/eit-market-data/krx-profile/cookies.json
+```
+
+그 다음 preflight를 실행합니다:
 
 ```bash
 python scripts/preflight_kr_data.py --as-of 2026-03-06 --ticker 005930
@@ -25,6 +38,7 @@ python scripts/preflight_kr_data.py --as-of 2026-03-06 --ticker 005930
 This checks:
 - WSL2 detection and `/etc/resolv.conf`
 - DNS resolution for KRX/Naver/ECOS
+- KRX authenticated session health for official index/market-wide endpoints
 - `pykrx` price, benchmark, and sector lookup
 - DART fundamentals
 - ECOS macro coverage
@@ -42,3 +56,32 @@ See [docs/wsl2-runbook.md](docs/wsl2-runbook.md) for the full runbook.
 - [docs/api-keys.md](docs/api-keys.md)
 - [docs/eit-research-data-requirements.md](docs/eit-research-data-requirements.md)
 - [docs/wsl2-runbook.md](docs/wsl2-runbook.md)
+
+## KR Bundle For `eit-research`
+
+GitHub-hosted/CI-safe KR snapshot bundle export:
+
+```bash
+python scripts/build_kr_snapshot.py --as-of 2026-03-31 --profile ci_safe --force
+```
+
+Output files are written under `artifacts/snapshots/YYYY-MM/`:
+
+- `snapshot.json`
+- `metadata.json`
+- `manifest.json`
+- `summary.json`
+
+`eit-research` can consume the bundle with:
+
+```bash
+eit build-snapshot 2026-03 --market kr --bundle-dir ../eit-market-data/artifacts/snapshots
+```
+
+## GitHub Actions Automation
+
+- Scheduled workflow: `.github/workflows/daily-market-data.yml`
+- Cron: `30 22 * * 0-4` (UTC), which is `07:30 Asia/Seoul` on weekdays
+- Current daily batch entrypoint: `python scripts/run_daily_batch.py`
+- Batch artifacts are written under `out/<as_of>_<timestamp>/` and uploaded as GitHub Actions artifacts
+- Current scheduled batch scope is KR preflight + KR crawl + month-end KR snapshot build

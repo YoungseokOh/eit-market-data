@@ -6,7 +6,7 @@ import asyncio
 import logging
 import os
 import re
-from datetime import date, timedelta
+from datetime import date
 from typing import Any
 
 from eit_market_data.schemas.snapshot import FilingData, FundamentalData, QuarterlyFinancials
@@ -45,6 +45,26 @@ _SECTION_PATTERNS: dict[str, list[str]] = {
         r"MD&A",
     ],
 }
+
+_REPORT_CODE_TO_QUARTER: dict[str, str] = {
+    "11013": "Q1",
+    "11012": "Q2",
+    "11014": "Q3",
+    "11011": "Q4",
+}
+
+_FLOW_FIELDS = {
+    "revenue",
+    "operating_income",
+    "net_income",
+    "gross_profit",
+    "eps",
+    "interest_expense",
+    "operating_cash_flow",
+    "capital_expenditure",
+}
+
+_EPS_FIELDS = {"eps"}
 
 
 def _normalize_ticker(ticker: str) -> str:
@@ -149,6 +169,94 @@ def _extract_sections(doc_text: str, max_chars: int = 8000) -> dict[str, str]:
             extracted[section_name] = chunk
 
     return extracted
+
+
+def _quarter_sort_key(fiscal_quarter: str) -> tuple[int, int]:
+    year = int(fiscal_quarter[:4])
+    quarter_num = int(fiscal_quarter[-1])
+    return year, quarter_num
+
+
+def _previous_cumulative_quarter(fiscal_quarter: str) -> str | None:
+    year = int(fiscal_quarter[:4])
+    quarter = fiscal_quarter[-2:]
+    if quarter == "Q1":
+        return None
+    if quarter == "Q2":
+        return f"{year}Q1"
+    if quarter == "Q3":
+        return f"{year}Q2"
+    if quarter == "Q4":
+        return f"{year}Q3"
+    return None
+
+
+def _round_quarter_value(field: str, value: float) -> float:
+    return round(value, 2 if field in _EPS_FIELDS else 1)
+
+
+def _normalize_quarter_values(
+    fiscal_quarter: str,
+    raw_values: dict[str, float | None],
+    raw_quarter_map: dict[str, dict[str, float | None]],
+) -> dict[str, float | None]:
+    normalized = dict(raw_values)
+    previous_quarter = _previous_cumulative_quarter(fiscal_quarter)
+    for field in _FLOW_FIELDS:
+        current = raw_values.get(field)
+        if fiscal_quarter.endswith("Q1") or current is None:
+            normalized[field] = current
+            continue
+
+        if previous_quarter is None:
+            normalized[field] = current
+            continue
+
+        previous = raw_quarter_map.get(previous_quarter, {}).get(field)
+        if previous is None:
+            normalized[field] = None
+            continue
+
+        normalized[field] = _round_quarter_value(field, current - previous)
+    return normalized
+
+
+def _report_entries_from_list(report_list: Any, as_of: date) -> list[dict[str, Any]]:
+    if report_list is None or report_list.empty:
+        return []
+
+    reports = report_list.copy()
+    if "rcept_dt" in reports.columns:
+        reports = reports.loc[
+            reports["rcept_dt"].fillna("").astype(str) <= _date_to_yyyymmdd(as_of)
+        ]
+    if reports.empty:
+        return []
+
+    entries_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    for _, row in reports.iterrows():
+        reprt_code = str(row.get("reprt_code", "")).strip()
+        quarter_label = _REPORT_CODE_TO_QUARTER.get(reprt_code)
+        bsns_year = str(row.get("bsns_year", "")).strip()
+        report_date = _parse_date_yyyymmdd(row.get("rcept_dt"))
+        if quarter_label is None or not bsns_year.isdigit() or report_date is None:
+            continue
+
+        key = (bsns_year, reprt_code)
+        current = entries_by_key.get(key)
+        entry = {
+            "fiscal_quarter": f"{bsns_year}{quarter_label}",
+            "report_date": report_date,
+            "bsns_year": bsns_year,
+            "reprt_code": reprt_code,
+            "rcept_no": str(row.get("rcept_no", "")).strip(),
+        }
+        if current is None or report_date > current["report_date"]:
+            entries_by_key[key] = entry
+
+    entries = list(entries_by_key.values())
+    entries.sort(key=lambda item: item["report_date"], reverse=True)
+    return entries
 
 
 class DartProvider:
@@ -307,22 +415,43 @@ class DartProvider:
                     return val
         return None
 
-    def _quarter_candidates(self, as_of: date) -> list[tuple[str, date, str, str]]:
-        candidates: list[tuple[str, date, str, str]] = []
-        quarter_defs = [
-            ("Q4", 12, 31, "11011"),
-            ("Q3", 9, 30, "11014"),
-            ("Q2", 6, 30, "11012"),
-            ("Q1", 3, 31, "11013"),
-        ]
-        for year in range(as_of.year, as_of.year - 10, -1):
-            for q_label, month, day, reprt_code in quarter_defs:
-                period_end = date(year, month, day)
-                report_date = period_end + timedelta(days=60)
-                if report_date <= as_of:
-                    candidates.append((f"{year}{q_label}", report_date, str(year), reprt_code))
-        candidates.sort(key=lambda x: x[1], reverse=True)
-        return candidates
+    def _fetch_report_list(self, corp_code: str, as_of: date):  # noqa: ANN202
+        return self._dart.list(
+            corp_code,
+            start=f"{max(as_of.year - 10, 2000)}0101",
+            end=_date_to_yyyymmdd(as_of),
+            kind="A",
+        )
+
+    def _build_raw_quarter_data(self, df_fin: Any) -> dict[str, float | None]:
+        return {
+            "revenue": self._pick_account_value(df_fin, _ACCOUNT_MAP["revenue"]),
+            "operating_income": self._pick_account_value(
+                df_fin, _ACCOUNT_MAP["operating_income"]
+            ),
+            "net_income": self._pick_account_value(df_fin, _ACCOUNT_MAP["net_income"]),
+            "total_assets": self._pick_account_value(df_fin, _ACCOUNT_MAP["total_assets"]),
+            "total_liabilities": self._pick_account_value(
+                df_fin, _ACCOUNT_MAP["total_liabilities"]
+            ),
+            "total_equity": self._pick_account_value(df_fin, _ACCOUNT_MAP["total_equity"]),
+            "current_assets": self._pick_account_value(df_fin, _ACCOUNT_MAP["current_assets"]),
+            "current_liabilities": self._pick_account_value(
+                df_fin, _ACCOUNT_MAP["current_liabilities"]
+            ),
+            "gross_profit": self._pick_account_value(df_fin, _ACCOUNT_MAP["gross_profit"]),
+            "total_debt": self._pick_account_value(df_fin, _ACCOUNT_MAP["total_debt"]),
+            "eps": self._pick_eps_value(df_fin),
+            "interest_expense": self._pick_account_value(
+                df_fin, _ACCOUNT_MAP["interest_expense"]
+            ),
+            "operating_cash_flow": self._pick_account_value(
+                df_fin, _ACCOUNT_MAP["operating_cash_flow"]
+            ),
+            "capital_expenditure": self._pick_account_value(
+                df_fin, _ACCOUNT_MAP["capital_expenditure"]
+            ),
+        }
 
     def _fetch_fundamentals_sync(
         self, ticker: str, as_of: date, n_quarters: int
@@ -331,63 +460,58 @@ class DartProvider:
         if not corp_code:
             return FundamentalData(ticker=ticker)
 
-        quarters: list[QuarterlyFinancials] = []
-        for fiscal_q, report_date, bsns_year, reprt_code in self._quarter_candidates(as_of):
-            if len(quarters) >= n_quarters:
-                break
+        try:
+            report_list = self._fetch_report_list(corp_code, as_of)
+        except Exception as e:
+            logger.warning("DART report list fetch failed for %s: %s", ticker, e)
+            return FundamentalData(ticker=ticker)
 
+        entries = _report_entries_from_list(report_list, as_of)
+        raw_quarter_map: dict[str, dict[str, float | None]] = {}
+        report_dates: dict[str, date] = {}
+
+        for entry in sorted(entries, key=lambda item: _quarter_sort_key(item["fiscal_quarter"])):
+            fiscal_quarter = entry["fiscal_quarter"]
             try:
-                df_fin = self._fetch_finstate(corp_code, bsns_year, reprt_code)
+                df_fin = self._fetch_finstate(
+                    corp_code,
+                    entry["bsns_year"],
+                    entry["reprt_code"],
+                )
             except Exception:
                 df_fin = None
             if df_fin is None or df_fin.empty:
                 continue
 
-            q_data = {
-                "revenue": self._pick_account_value(df_fin, _ACCOUNT_MAP["revenue"]),
-                "operating_income": self._pick_account_value(
-                    df_fin, _ACCOUNT_MAP["operating_income"]
-                ),
-                "net_income": self._pick_account_value(df_fin, _ACCOUNT_MAP["net_income"]),
-                "total_assets": self._pick_account_value(df_fin, _ACCOUNT_MAP["total_assets"]),
-                "total_liabilities": self._pick_account_value(
-                    df_fin, _ACCOUNT_MAP["total_liabilities"]
-                ),
-                "total_equity": self._pick_account_value(df_fin, _ACCOUNT_MAP["total_equity"]),
-                "current_assets": self._pick_account_value(
-                    df_fin, _ACCOUNT_MAP["current_assets"]
-                ),
-                "current_liabilities": self._pick_account_value(
-                    df_fin, _ACCOUNT_MAP["current_liabilities"]
-                ),
-                "gross_profit": self._pick_account_value(df_fin, _ACCOUNT_MAP["gross_profit"]),
-                "total_debt": self._pick_account_value(df_fin, _ACCOUNT_MAP["total_debt"]),
-                "eps": self._pick_eps_value(df_fin),
-                "interest_expense": self._pick_account_value(
-                    df_fin, _ACCOUNT_MAP["interest_expense"]
-                ),
-                "operating_cash_flow": self._pick_account_value(
-                    df_fin, _ACCOUNT_MAP["operating_cash_flow"]
-                ),
-                "capital_expenditure": self._pick_account_value(
-                    df_fin, _ACCOUNT_MAP["capital_expenditure"]
-                ),
-            }
-
-            if all(v is None for v in q_data.values()):
+            raw_values = self._build_raw_quarter_data(df_fin)
+            if all(value is None for value in raw_values.values()):
                 continue
 
+            raw_quarter_map[fiscal_quarter] = raw_values
+            report_dates[fiscal_quarter] = entry["report_date"]
+
+        quarters: list[QuarterlyFinancials] = []
+        for fiscal_quarter, raw_values in raw_quarter_map.items():
+            normalized = _normalize_quarter_values(
+                fiscal_quarter,
+                raw_values,
+                raw_quarter_map,
+            )
+            if all(value is None for value in normalized.values()):
+                continue
             quarters.append(
                 QuarterlyFinancials(
-                    fiscal_quarter=fiscal_q,
-                    report_date=report_date,
-                    **q_data,
+                    fiscal_quarter=fiscal_quarter,
+                    report_date=report_dates[fiscal_quarter],
+                    **normalized,
                 )
             )
 
+        quarters.sort(key=lambda quarter: quarter.report_date, reverse=True)
+
         return FundamentalData(
             ticker=ticker,
-            quarters=quarters,
+            quarters=quarters[:n_quarters],
         )
 
     # ------------------------------------------------------------------
@@ -400,12 +524,7 @@ class DartProvider:
             return FilingData(ticker=ticker)
 
         try:
-            report_list = self._dart.list(
-                corp_code,
-                start=f"{max(as_of.year - 10, 2000)}0101",
-                end=_date_to_yyyymmdd(as_of),
-                kind="A",
-            )
+            report_list = self._fetch_report_list(corp_code, as_of)
         except Exception as e:
             logger.warning("DART report list fetch failed for %s: %s", ticker, e)
             return FilingData(ticker=ticker)

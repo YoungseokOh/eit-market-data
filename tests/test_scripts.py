@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.util
+import sys
 from datetime import date
 from pathlib import Path
 
@@ -11,6 +13,7 @@ def _load_module(path: Path, module_name: str):
     spec = importlib.util.spec_from_file_location(module_name, path)
     module = importlib.util.module_from_spec(spec)
     assert spec is not None and spec.loader is not None
+    sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -32,7 +35,11 @@ def test_fetch_pykrx_all_index_data_uses_shared_fallback(monkeypatch, tmp_path: 
     )
     saved: list[tuple[str, int]] = []
 
-    monkeypatch.setattr(module, "fetch_index_ohlcv_frame", lambda code, start, end, logger_=None: (frame, "yahoo:test"))
+    monkeypatch.setattr(
+        module,
+        "fetch_index_ohlcv_frame",
+        lambda code, start, end, logger_=None, official_only=True: (frame, "yahoo:test"),
+    )
     monkeypatch.setattr(module, "_call", lambda fn, *args, **kwargs: pd.DataFrame())
     monkeypatch.setattr(
         module,
@@ -67,3 +74,39 @@ def test_crawl_kr_data_keeps_existing_sector_snapshot_on_failure(monkeypatch, tm
     captured = capsys.readouterr()
     assert "keeping existing sector snapshot" in captured.out
     assert snapshot_path.read_text() == "keep-me"
+
+
+def test_preflight_dart_marks_missing_market_fields_as_degraded(monkeypatch) -> None:
+    module = _load_module(
+        Path("scripts/preflight_kr_data.py"),
+        "preflight_kr_data_test",
+    )
+    monkeypatch.setenv("DART_API_KEY", "test")
+
+    class DummyProvider:
+        async def fetch_fundamentals(self, ticker, as_of, n_quarters=4):  # noqa: ANN001
+            from eit_market_data.schemas.snapshot import FundamentalData, QuarterlyFinancials
+
+            return FundamentalData(
+                ticker=ticker,
+                quarters=[
+                    QuarterlyFinancials(
+                        fiscal_quarter="2024Q4",
+                        report_date=date(2025, 3, 10),
+                        revenue=100.0,
+                        operating_income=10.0,
+                        net_income=8.0,
+                        total_assets=200.0,
+                        total_equity=120.0,
+                    )
+                    for _ in range(4)
+                ],
+            )
+
+    monkeypatch.setattr(module, "CompositeKrFundamentalProvider", lambda: DummyProvider())
+
+    result = asyncio.run(module._check_dart(date(2026, 3, 6), "005930"))
+
+    assert result.status == "degraded"
+    assert "market_cap" in result.detail
+    assert "last_close_price" in result.detail

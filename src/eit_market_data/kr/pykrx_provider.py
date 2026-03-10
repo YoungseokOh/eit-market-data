@@ -14,6 +14,7 @@ from eit_market_data.kr.market_helpers import (
     load_sector_snapshot_map,
     normalize_ticker,
 )
+from eit_market_data.kr.krx_auth import KrxAuthRequired, install_pykrx_krx_session_hooks
 from eit_market_data.schemas.snapshot import (
     FundamentalData,
     NewsItem,
@@ -41,7 +42,11 @@ class PykrxProvider:
     - NewsProvider (stub: pykrx has no news API)
     """
 
-    def __init__(self, fundamental_provider: Any | None = None) -> None:
+    def __init__(
+        self,
+        fundamental_provider: Any | None = None,
+        official_only: bool = True,
+    ) -> None:
         try:
             from pykrx import stock  # noqa: F401
         except ImportError as e:
@@ -49,13 +54,17 @@ class PykrxProvider:
                 "pykrx is required for Korean market data. "
                 "Install with: pip install -e '.[kr]'"
             ) from e
+        install_pykrx_krx_session_hooks()
         self._fundamental_provider = fundamental_provider
         self._fundamental_provider_init_failed = False
+        self._official_only = official_only
         self._sector_cache: dict[tuple[str, str], str] = {}
         self._logged_sector_snapshots: set[tuple[str, str]] = set()
         self._semaphore = asyncio.Semaphore(2)
 
-    async def _run_limited(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    async def _run_limited(
+        self, fn: Callable[..., Any], *args: Any, **kwargs: Any
+    ) -> Any:
         """Run a sync pykrx call in thread with concurrency/rate limits."""
         async with self._semaphore:
             try:
@@ -132,6 +141,7 @@ class PykrxProvider:
                     market,
                     effective_as_of,
                     logger_=logger,
+                    official_only=self._official_only,
                 )
                 if snapshot_path is not None:
                     snapshot_key = (market, snapshot_path.name)
@@ -146,7 +156,9 @@ class PykrxProvider:
                 for t in unresolved:
                     if t in snapshot_map:
                         self._sector_cache[(t, date_str)] = snapshot_map[t]
-                unresolved = [t for t in unresolved if (t, date_str) not in self._sector_cache]
+                unresolved = [
+                    t for t in unresolved if (t, date_str) not in self._sector_cache
+                ]
                 if not unresolved:
                     break
 
@@ -158,7 +170,9 @@ class PykrxProvider:
                     if t in kospi_map:
                         self._sector_cache[(t, date_str)] = kospi_map[t]
 
-            unresolved = [t for t in unresolved if (t, date_str) not in self._sector_cache]
+            unresolved = [
+                t for t in unresolved if (t, date_str) not in self._sector_cache
+            ]
             if unresolved:
                 kosdaq_map = await self._run_limited(
                     self._fetch_sector_classification_sync, "KOSDAQ", effective_as_of
@@ -172,7 +186,9 @@ class PykrxProvider:
 
         return result
 
-    def _fetch_sector_classification_sync(self, market: str, as_of: date) -> dict[str, str]:
+    def _fetch_sector_classification_sync(
+        self, market: str, as_of: date
+    ) -> dict[str, str]:
         sector_map, _query_day = fetch_live_sector_classification_map(
             market,
             as_of,
@@ -185,12 +201,15 @@ class PykrxProvider:
     ) -> SectorAverages:
         """Compute sector average metrics from quarterly fundamentals."""
         import numpy as np
+
         provider = self._fundamental_provider
         if provider is None and not self._fundamental_provider_init_failed:
             try:
-                from eit_market_data.kr.dart_provider import DartProvider
+                from eit_market_data.kr.fundamental_provider import (
+                    CompositeKrFundamentalProvider,
+                )
 
-                provider = DartProvider()
+                provider = CompositeKrFundamentalProvider()
                 self._fundamental_provider = provider
             except Exception:
                 self._fundamental_provider_init_failed = True
@@ -221,7 +240,9 @@ class PykrxProvider:
                     metrics.setdefault(key, []).append(val)
 
             _add("roa", (q.net_income or 0) / ta if ta else None)
-            _add("roe", (q.net_income or 0) / q.total_equity if q.total_equity else None)
+            _add(
+                "roe", (q.net_income or 0) / q.total_equity if q.total_equity else None
+            )
             _add("gross_margin", (q.gross_profit or 0) / rev)
             _add("operating_margin", (q.operating_income or 0) / rev)
             _add("net_margin", (q.net_income or 0) / rev)
@@ -252,13 +273,23 @@ class PykrxProvider:
             return await self._run_limited(
                 self._fetch_benchmark_sync, as_of, lookback_days
             )
+        except KrxAuthRequired:
+            if self._official_only:
+                raise
+            return []
         except Exception as e:
             logger.warning("pykrx benchmark fetch failed: %s", e)
             return []
 
     def _fetch_benchmark_sync(self, as_of: date, lookback_days: int) -> list[PriceBar]:
         start = as_of - timedelta(days=max(int(lookback_days * 1.8), 30))
-        df, _source = fetch_index_ohlcv_frame("1001", start, as_of, logger_=logger)
+        df, _source = fetch_index_ohlcv_frame(
+            "1001",
+            start,
+            as_of,
+            logger_=logger,
+            official_only=self._official_only,
+        )
         if df is None or df.empty:
             return []
 
@@ -308,6 +339,8 @@ def get_kr_universe(
     Returns 6-digit stock codes sorted by market cap descending.
     """
     from pykrx import stock
+
+    install_pykrx_krx_session_hooks()
 
     if markets is None:
         markets = ["KOSPI", "KOSDAQ"]

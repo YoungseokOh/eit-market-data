@@ -10,12 +10,15 @@ import asyncio
 import hashlib
 import json
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Literal
 
 from eit_market_data.synthetic import SyntheticProvider
 from eit_market_data.schemas.snapshot import MonthlySnapshot, SnapshotMetadata
+
+MONTHLY_SNAPSHOT_FILENAME = "snapshot.json"
 
 
 @dataclass
@@ -50,21 +53,54 @@ def create_real_providers() -> dict:
     }
 
 
-def create_kr_providers() -> dict:
-    """Create Korean market data providers (pykrx + DART + ECOS).
+def create_kr_providers(
+    profile: Literal["official", "official_enriched", "ci_safe"] = "official",
+    *,
+    universe_csv: str | Path | None = None,
+) -> dict:
+    """Create Korean market data providers.
 
     Returns dict of keyword arguments for SnapshotBuilder.
     Requires: pip install -e '.[kr]'
     """
-    from eit_market_data.kr.pykrx_provider import PykrxProvider
-    from eit_market_data.kr.dart_provider import DartProvider
+    from eit_market_data.kr.fundamental_provider import CompositeKrFundamentalProvider
+    from eit_market_data.kr.ci_safe_provider import (
+        FdrNaverPriceProvider,
+        NullBenchmarkProvider,
+        NullNewsProvider,
+        SeedSectorProvider,
+    )
     from eit_market_data.kr.ecos_provider import EcosMacroProvider
+    from eit_market_data.kr.dart_provider import DartProvider
+    from eit_market_data.kr.pykrx_provider import PykrxProvider
 
     dart = DartProvider()
-    pykrx = PykrxProvider(fundamental_provider=dart)
+    if profile == "ci_safe":
+        price_provider = FdrNaverPriceProvider()
+        fundamentals = CompositeKrFundamentalProvider(
+            dart_provider=dart,
+            price_provider=price_provider,
+            use_market_snapshot=False,
+        )
+        sector_provider = SeedSectorProvider(
+            universe_csv=universe_csv,
+            fundamental_provider=fundamentals,
+        )
+        return {
+            "price_provider": price_provider,
+            "fundamental_provider": fundamentals,
+            "filing_provider": dart,
+            "news_provider": NullNewsProvider(),
+            "macro_provider": EcosMacroProvider(),
+            "sector_provider": sector_provider,
+            "benchmark_provider": NullBenchmarkProvider(),
+        }
+
+    fundamentals = CompositeKrFundamentalProvider(dart_provider=dart)
+    pykrx = PykrxProvider(fundamental_provider=fundamentals, official_only=True)
     return {
         "price_provider": pykrx,
-        "fundamental_provider": dart,
+        "fundamental_provider": fundamentals,
         "filing_provider": dart,
         "news_provider": pykrx,
         "macro_provider": EcosMacroProvider(),
@@ -238,5 +274,7 @@ class SnapshotBuilder:
 
         meta_path = artifacts_dir / "metadata.json"
         meta_path.write_text(snapshot.metadata.model_dump_json(indent=2))
+        snapshot_path = artifacts_dir / MONTHLY_SNAPSHOT_FILENAME
+        snapshot_path.write_text(snapshot.model_dump_json(indent=2))
 
         return snapshot

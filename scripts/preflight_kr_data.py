@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: E402
 from __future__ import annotations
 
 import argparse
@@ -8,7 +9,7 @@ import platform
 import socket
 import sys
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -16,14 +17,25 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from eit_market_data.kr.dart_provider import DartProvider
 from eit_market_data.kr.ecos_provider import EcosMacroProvider
-from eit_market_data.kr.market_helpers import load_sector_snapshot_map
+from eit_market_data.kr.fundamental_provider import CompositeKrFundamentalProvider
+from eit_market_data.kr.krx_auth import (
+    KrxAuthRequired,
+    check_krx_auth,
+    ensure_krx_authenticated_session,
+)
+from eit_market_data.kr.market_helpers import (
+    fetch_index_ohlcv_frame,
+    fetch_market_cap_frame,
+    fetch_market_fundamental_frame,
+    fetch_market_ticker_list,
+    load_sector_snapshot_map,
+)
 from eit_market_data.kr.pykrx_provider import PykrxProvider
 
 HOSTS = (
     "data.krx.co.kr",
-    "fchart.stock.naver.com",
+    "opendart.fss.or.kr",
     "ecos.bok.or.kr",
 )
 CRITICAL_MACRO_KEYS = (
@@ -67,7 +79,9 @@ def _check_wsl() -> CheckResult:
 def _check_resolver() -> CheckResult:
     nameservers = _read_nameservers()
     if not nameservers:
-        return CheckResult("resolver", "failed", "no nameserver entries in /etc/resolv.conf")
+        return CheckResult(
+            "resolver", "failed", "no nameserver entries in /etc/resolv.conf"
+        )
     return CheckResult("resolver", "ok", ", ".join(nameservers))
 
 
@@ -83,7 +97,20 @@ def _check_dns(host: str) -> CheckResult:
 
 async def _check_market_stack(as_of: date, ticker: str) -> list[CheckResult]:
     results: list[CheckResult] = []
-    provider = PykrxProvider()
+    try:
+        session = ensure_krx_authenticated_session(interactive=False)
+    except KrxAuthRequired as exc:
+        results.append(CheckResult("krx:auth", "failed", str(exc)))
+        return results
+
+    auth_status = check_krx_auth(session)
+    if auth_status.authenticated:
+        results.append(CheckResult("krx:auth", "ok", auth_status.detail))
+    else:
+        results.append(CheckResult("krx:auth", "failed", auth_status.detail))
+        return results
+
+    provider = PykrxProvider(official_only=True)
 
     prices = await provider.fetch_prices(ticker, as_of, lookback_days=20)
     if prices:
@@ -95,32 +122,136 @@ async def _check_market_stack(as_of: date, ticker: str) -> list[CheckResult]:
             )
         )
     else:
-        results.append(CheckResult("pykrx:prices", "failed", f"{ticker} returned no bars"))
-
-    benchmark = await provider.fetch_benchmark(as_of, lookback_days=20)
-    if benchmark:
         results.append(
-            CheckResult(
-                "pykrx:benchmark",
-                "ok",
-                f"bars={len(benchmark)} last={benchmark[-1].date}",
-            )
+            CheckResult("pykrx:prices", "failed", f"{ticker} returned no bars")
         )
+
+    try:
+        tickers = fetch_market_ticker_list(as_of, "KOSPI")
+    except Exception as exc:
+        results.append(CheckResult("pykrx:ticker-list", "failed", str(exc)))
     else:
-        results.append(CheckResult("pykrx:benchmark", "failed", "benchmark returned no bars"))
+        if tickers:
+            results.append(
+                CheckResult("pykrx:ticker-list", "ok", f"KOSPI tickers={len(tickers)}")
+            )
+        else:
+            results.append(
+                CheckResult("pykrx:ticker-list", "failed", "KOSPI returned no tickers")
+            )
+
+    try:
+        cap_frame = fetch_market_cap_frame(as_of, "KOSPI")
+    except Exception as exc:
+        results.append(CheckResult("pykrx:market-cap", "failed", str(exc)))
+    else:
+        if cap_frame is not None and not cap_frame.empty:
+            results.append(
+                CheckResult("pykrx:market-cap", "ok", f"KOSPI rows={len(cap_frame)}")
+            )
+        else:
+            results.append(
+                CheckResult("pykrx:market-cap", "failed", "KOSPI market cap empty")
+            )
+
+    try:
+        fundamental_frame = fetch_market_fundamental_frame(as_of, "KOSPI")
+    except Exception as exc:
+        results.append(CheckResult("pykrx:market-fundamental", "failed", str(exc)))
+    else:
+        if fundamental_frame is not None and not fundamental_frame.empty:
+            results.append(
+                CheckResult(
+                    "pykrx:market-fundamental",
+                    "ok",
+                    f"KOSPI rows={len(fundamental_frame)}",
+                )
+            )
+        else:
+            results.append(
+                CheckResult(
+                    "pykrx:market-fundamental", "failed", "KOSPI fundamental empty"
+                )
+            )
+
+    benchmark_start = as_of - timedelta(days=40)
+    try:
+        benchmark_frame, benchmark_source = fetch_index_ohlcv_frame(
+            "1001",
+            benchmark_start,
+            as_of,
+            official_only=True,
+        )
+        benchmark = await provider.fetch_benchmark(as_of, lookback_days=20)
+    except Exception as exc:
+        results.append(CheckResult("pykrx:benchmark", "failed", str(exc)))
+    else:
+        if benchmark and benchmark_source == "pykrx" and benchmark_frame is not None:
+            results.append(
+                CheckResult(
+                    "pykrx:benchmark",
+                    "ok",
+                    f"source={benchmark_source} bars={len(benchmark)} last={benchmark[-1].date}",
+                )
+            )
+        else:
+            results.append(
+                CheckResult(
+                    "pykrx:benchmark",
+                    "failed",
+                    f"source={benchmark_source or 'missing'} benchmark returned no bars",
+                )
+            )
 
     sectors = await provider.fetch_sector_map([ticker], as_of=as_of)
     sector_name = sectors.get(ticker, "General")
     if sector_name and sector_name != "General":
         results.append(CheckResult("pykrx:sector", "ok", sector_name))
     else:
-        results.append(CheckResult("pykrx:sector", "degraded", sector_name or "missing"))
+        results.append(
+            CheckResult("pykrx:sector", "degraded", sector_name or "missing")
+        )
 
-    snapshot_map, snapshot_path = load_sector_snapshot_map("KOSPI", as_of)
+    snapshot_map, snapshot_path = load_sector_snapshot_map(
+        "KOSPI", as_of, official_only=True
+    )
     if snapshot_path is None or not snapshot_map:
-        results.append(CheckResult("sector-snapshot", "failed", "no cached KOSPI snapshot"))
+        fallback_map, fallback_path = load_sector_snapshot_map(
+            "KOSPI", as_of, official_only=False
+        )
+        if fallback_path is not None and fallback_map:
+            age_days = (
+                as_of
+                - date.fromisoformat(
+                    fallback_path.stem.rsplit("_", 1)[-1][:4]
+                    + "-"
+                    + fallback_path.stem.rsplit("_", 1)[-1][4:6]
+                    + "-"
+                    + fallback_path.stem.rsplit("_", 1)[-1][6:8]
+                )
+            ).days
+            results.append(
+                CheckResult(
+                    "sector-snapshot",
+                    "degraded",
+                    f"{fallback_path.name} age_days={age_days} non_authoritative_cache",
+                )
+            )
+        else:
+            results.append(
+                CheckResult("sector-snapshot", "failed", "no cached KOSPI snapshot")
+            )
     else:
-        age_days = (as_of - date.fromisoformat(snapshot_path.stem.rsplit("_", 1)[-1][:4] + "-" + snapshot_path.stem.rsplit("_", 1)[-1][4:6] + "-" + snapshot_path.stem.rsplit("_", 1)[-1][6:8])).days
+        age_days = (
+            as_of
+            - date.fromisoformat(
+                snapshot_path.stem.rsplit("_", 1)[-1][:4]
+                + "-"
+                + snapshot_path.stem.rsplit("_", 1)[-1][4:6]
+                + "-"
+                + snapshot_path.stem.rsplit("_", 1)[-1][6:8]
+            )
+        ).days
         status = "ok" if age_days <= 31 else "degraded"
         results.append(
             CheckResult(
@@ -138,18 +269,44 @@ async def _check_dart(as_of: date, ticker: str) -> CheckResult:
         return CheckResult("dart", "failed", "DART_API_KEY missing")
 
     try:
-        provider = DartProvider()
-        fundamentals = await provider.fetch_fundamentals(ticker, as_of, n_quarters=1)
+        provider = CompositeKrFundamentalProvider()
+        fundamentals = await provider.fetch_fundamentals(ticker, as_of, n_quarters=4)
     except Exception as exc:
         return CheckResult("dart", "failed", str(exc))
 
-    if fundamentals.quarters:
+    if len(fundamentals.quarters) < 4:
+        return CheckResult("dart", "degraded", f"quarters={len(fundamentals.quarters)}")
+
+    latest = fundamentals.quarters[0]
+    missing = [
+        field
+        for field in (
+            "revenue",
+            "operating_income",
+            "net_income",
+            "total_assets",
+            "total_equity",
+        )
+        if getattr(latest, field) is None
+    ]
+    if latest.report_date > as_of:
+        missing.append("report_date")
+    if fundamentals.market_cap is None:
+        missing.append("market_cap")
+    if fundamentals.last_close_price is None:
+        missing.append("last_close_price")
+
+    if not missing:
         return CheckResult(
             "dart",
             "ok",
-            f"quarters={len(fundamentals.quarters)} latest={fundamentals.quarters[0].fiscal_quarter}",
+            (
+                f"quarters={len(fundamentals.quarters)} "
+                f"latest={latest.fiscal_quarter} "
+                f"report_date={latest.report_date}"
+            ),
         )
-    return CheckResult("dart", "degraded", "no fundamentals returned")
+    return CheckResult("dart", "degraded", f"missing={','.join(missing)}")
 
 
 async def _check_ecos(as_of: date) -> CheckResult:
@@ -190,8 +347,12 @@ async def _run_checks(as_of: date, ticker: str) -> list[CheckResult]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="KR data preflight after reboot/WSL changes.")
-    parser.add_argument("--as-of", default=date.today().isoformat(), help="Probe date (YYYY-MM-DD)")
+    parser = argparse.ArgumentParser(
+        description="KR data preflight after reboot/WSL changes."
+    )
+    parser.add_argument(
+        "--as-of", default=date.today().isoformat(), help="Probe date (YYYY-MM-DD)"
+    )
     parser.add_argument("--ticker", default="005930", help="KR ticker to probe")
     args = parser.parse_args()
 
@@ -202,7 +363,9 @@ def main() -> None:
 
     failed = sum(1 for result in results if result.status == "failed")
     degraded = sum(1 for result in results if result.status == "degraded")
-    print(f"[SUMMARY] ok={len(results) - failed - degraded} degraded={degraded} failed={failed}")
+    print(
+        f"[SUMMARY] ok={len(results) - failed - degraded} degraded={degraded} failed={failed}"
+    )
 
     if failed:
         raise SystemExit(1)
