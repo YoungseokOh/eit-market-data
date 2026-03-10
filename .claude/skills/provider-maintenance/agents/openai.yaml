@@ -1,0 +1,7 @@
+interface:
+  display_name: "Provider Maintenance"
+  short_description: "Update providers, factories, tests, and exposed behavior together."
+  default_prompt: "Use $provider-maintenance to update this market-data provider and the surrounding wiring safely."
+
+policy:
+  allow_implicit_invocation: true

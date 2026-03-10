@@ -1,0 +1,7 @@
+interface:
+  display_name: "Market Data Preflight"
+  short_description: "Validate KR pipeline readiness before running crawls or batch jobs."
+  default_prompt: "Use $market-data-preflight to check KR pipeline readiness before I run a crawl or batch job."
+
+policy:
+  allow_implicit_invocation: true

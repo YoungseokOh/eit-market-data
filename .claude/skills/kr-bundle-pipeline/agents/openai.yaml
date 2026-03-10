@@ -1,0 +1,7 @@
+interface:
+  display_name: "KR Bundle Pipeline"
+  short_description: "Build and validate KR snapshot bundles and daily batch outputs."
+  default_prompt: "Use $kr-bundle-pipeline to validate this KR bundle export and its eit-research compatibility."
+
+policy:
+  allow_implicit_invocation: true

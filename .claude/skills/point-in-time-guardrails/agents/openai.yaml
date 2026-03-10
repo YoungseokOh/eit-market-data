@@ -1,0 +1,7 @@
+interface:
+  display_name: "Point-in-Time Guardrails"
+  short_description: "Protect snapshots and bundle exports from future-data leakage."
+  default_prompt: "Use $point-in-time-guardrails to review this snapshot-related change for look-ahead risk."
+
+policy:
+  allow_implicit_invocation: true

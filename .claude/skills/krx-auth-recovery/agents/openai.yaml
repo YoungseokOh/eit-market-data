@@ -1,0 +1,7 @@
+interface:
+  display_name: "KRX Auth Recovery"
+  short_description: "Debug browser-authenticated KRX and pykrx official-path failures."
+  default_prompt: "Use $krx-auth-recovery to debug this official KRX pykrx failure."
+
+policy:
+  allow_implicit_invocation: true
