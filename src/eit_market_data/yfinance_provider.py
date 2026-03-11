@@ -292,8 +292,15 @@ class YFinanceProvider:
     # SectorProvider
     # ------------------------------------------------------------------
 
-    async def fetch_sector_map(self, universe: list[str]) -> dict[str, str]:
-        """Get sector for each ticker from yfinance .info."""
+    async def fetch_sector_map(
+        self, universe: list[str], as_of: date | None = None
+    ) -> dict[str, str]:
+        """Get sector for each ticker from yfinance .info.
+
+        The as_of parameter is accepted for protocol compatibility but not used,
+        as yfinance sector mappings are not point-in-time specific.
+        """
+        _ = as_of
         async with _SEMAPHORE:
             return await asyncio.to_thread(self._fetch_sector_map_sync, universe)
 
