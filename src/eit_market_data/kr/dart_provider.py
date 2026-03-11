@@ -221,7 +221,47 @@ def _normalize_quarter_values(
     return normalized
 
 
+def _parse_report_nm(report_nm: str) -> tuple[str, str] | None:
+    """Parse DART report name to extract year and report code.
+
+    Examples:
+        '분기보고서 (2025.09)' → ('2025', '11014')  # Q3
+        '반기보고서 (2025.06)' → ('2025', '11012')  # Q2
+        '분기보고서 (2025.03)' → ('2025', '11013')  # Q1
+        '사업보고서 (2024.12)' → ('2024', '11011')  # Q4
+    """
+    if not report_nm:
+        return None
+
+    # Extract year and month from report_nm: "보고서명 (YYYY.MM)"
+    match = re.search(r"\((\d{4})\.(\d{2})\)", report_nm)
+    if not match:
+        return None
+
+    year = match.group(1)
+    month = match.group(2)
+
+    # Map month to report code
+    month_to_code = {
+        "03": "11013",  # Q1
+        "06": "11012",  # Q2 or H1
+        "09": "11014",  # Q3
+        "12": "11011",  # Q4 or annual
+    }
+
+    reprt_code = month_to_code.get(month)
+    if reprt_code is None:
+        return None
+
+    return year, reprt_code
+
+
 def _report_entries_from_list(report_list: Any, as_of: date) -> list[dict[str, Any]]:
+    """Extract report entries from OpenDartReader list() response.
+
+    Handles both old-style (with reprt_code, bsns_year columns) and new-style
+    (with report_nm field) API responses.
+    """
     if report_list is None or report_list.empty:
         return []
 
@@ -234,12 +274,33 @@ def _report_entries_from_list(report_list: Any, as_of: date) -> list[dict[str, A
         return []
 
     entries_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+
+    # Check if old-style columns exist (reprt_code, bsns_year)
+    has_old_style = "reprt_code" in reports.columns and "bsns_year" in reports.columns
+
     for _, row in reports.iterrows():
-        reprt_code = str(row.get("reprt_code", "")).strip()
-        quarter_label = _REPORT_CODE_TO_QUARTER.get(reprt_code)
-        bsns_year = str(row.get("bsns_year", "")).strip()
         report_date = _parse_date_yyyymmdd(row.get("rcept_dt"))
-        if quarter_label is None or not bsns_year.isdigit() or report_date is None:
+        rcept_no = str(row.get("rcept_no", "")).strip()
+
+        if report_date is None or not rcept_no:
+            continue
+
+        # Try old-style parsing first
+        if has_old_style:
+            reprt_code = str(row.get("reprt_code", "")).strip()
+            bsns_year = str(row.get("bsns_year", "")).strip()
+            if not reprt_code or not bsns_year.isdigit():
+                continue
+        else:
+            # New-style parsing from report_nm
+            report_nm = str(row.get("report_nm", "")).strip()
+            parsed = _parse_report_nm(report_nm)
+            if parsed is None:
+                continue
+            bsns_year, reprt_code = parsed
+
+        quarter_label = _REPORT_CODE_TO_QUARTER.get(reprt_code)
+        if quarter_label is None:
             continue
 
         key = (bsns_year, reprt_code)
@@ -249,7 +310,7 @@ def _report_entries_from_list(report_list: Any, as_of: date) -> list[dict[str, A
             "report_date": report_date,
             "bsns_year": bsns_year,
             "reprt_code": reprt_code,
-            "rcept_no": str(row.get("rcept_no", "")).strip(),
+            "rcept_no": rcept_no,
         }
         if current is None or report_date > current["report_date"]:
             entries_by_key[key] = entry
