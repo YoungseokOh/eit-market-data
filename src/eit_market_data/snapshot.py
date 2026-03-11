@@ -67,9 +67,9 @@ def create_kr_providers(
     from eit_market_data.kr.ci_safe_provider import (
         FdrNaverPriceProvider,
         NullBenchmarkProvider,
-        NullNewsProvider,
         SeedSectorProvider,
     )
+    from eit_market_data.kr.naver_news_provider import NaverNewsProvider
     from eit_market_data.kr.ecos_provider import EcosMacroProvider
     from eit_market_data.kr.dart_provider import DartProvider
     from eit_market_data.kr.pykrx_provider import PykrxProvider
@@ -90,7 +90,7 @@ def create_kr_providers(
             "price_provider": price_provider,
             "fundamental_provider": fundamentals,
             "filing_provider": dart,
-            "news_provider": NullNewsProvider(),
+            "news_provider": NaverNewsProvider(),
             "macro_provider": EcosMacroProvider(),
             "sector_provider": sector_provider,
             "benchmark_provider": NullBenchmarkProvider(),

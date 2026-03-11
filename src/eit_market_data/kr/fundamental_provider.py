@@ -184,6 +184,18 @@ class CompositeKrFundamentalProvider:
                 for quarter in quarters
             ]
 
+            # Calculate EPS from net_income / issued_shares if EPS is missing
+            updated_quarters = []
+            for quarter in quarters:
+                if quarter.eps is None and quarter.net_income and issued_shares and issued_shares > 0:
+                    # net_income is in KRW millions, issued_shares is in units
+                    # eps = (net_income * 1,000,000) / issued_shares
+                    eps = round((quarter.net_income * 1_000_000) / issued_shares, 0)
+                    updated_quarters.append(quarter.model_copy(update={"eps": eps}))
+                else:
+                    updated_quarters.append(quarter)
+            quarters = updated_quarters
+
         return dart_fundamentals.model_copy(
             update={
                 "ticker": normalize_ticker(dart_fundamentals.ticker),

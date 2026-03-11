@@ -62,6 +62,11 @@ class PykrxProvider:
         self._logged_sector_snapshots: set[tuple[str, str]] = set()
         self._semaphore = asyncio.Semaphore(2)
 
+        # Initialize news provider
+        from eit_market_data.kr.naver_news_provider import NaverNewsProvider
+
+        self._news_provider = NaverNewsProvider()
+
     async def _run_limited(
         self, fn: Callable[..., Any], *args: Any, **kwargs: Any
     ) -> Any:
@@ -323,9 +328,8 @@ class PykrxProvider:
     async def fetch_news(
         self, ticker: str, as_of: date, lookback_days: int = 30
     ) -> list[NewsItem]:
-        """pykrx does not provide news API."""
-        _ = (ticker, as_of, lookback_days)
-        return []
+        """Fetch Korean stock news from Naver Finance."""
+        return await self._news_provider.fetch_news(ticker, as_of, lookback_days)
 
 
 def get_kr_universe(

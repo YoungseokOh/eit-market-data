@@ -23,11 +23,15 @@ _ACCOUNT_MAP: dict[str, list[str]] = {
     "current_assets": ["유동자산"],
     "current_liabilities": ["유동부채"],
     "gross_profit": ["매출총이익", "매출총손익"],
-    "total_debt": ["차입금합계", "총차입금", "단기차입금"],
+    "total_debt": ["차입금합계", "총차입금", "단기차입금", "차입금", "금융부채", "사채 및 차입금"],
     "eps": ["주당순이익", "주당이익", "기본주당이익"],
     "interest_expense": ["이자비용"],
     "operating_cash_flow": ["영업활동현금흐름", "영업활동으로 인한 현금흐름"],
     "capital_expenditure": ["유형자산의취득", "유형자산취득"],
+    "cost_of_goods_sold": ["매출원가"],
+    "cash_and_equivalents": ["현금및현금성자산", "현금 및 현금성자산"],
+    "inventory": ["재고자산"],
+    "accounts_receivable": ["매출채권", "매출채권 및 기타채권"],
 }
 
 _SECTION_PATTERNS: dict[str, list[str]] = {
@@ -62,6 +66,9 @@ _FLOW_FIELDS = {
     "interest_expense",
     "operating_cash_flow",
     "capital_expenditure",
+    "cost_of_goods_sold",
+    "ebitda",
+    "free_cash_flow",
 }
 
 _EPS_FIELDS = {"eps"}
@@ -485,7 +492,7 @@ class DartProvider:
         )
 
     def _build_raw_quarter_data(self, df_fin: Any) -> dict[str, float | None]:
-        return {
+        raw = {
             "revenue": self._pick_account_value(df_fin, _ACCOUNT_MAP["revenue"]),
             "operating_income": self._pick_account_value(
                 df_fin, _ACCOUNT_MAP["operating_income"]
@@ -512,7 +519,32 @@ class DartProvider:
             "capital_expenditure": self._pick_account_value(
                 df_fin, _ACCOUNT_MAP["capital_expenditure"]
             ),
+            "cost_of_goods_sold": self._pick_account_value(
+                df_fin, _ACCOUNT_MAP["cost_of_goods_sold"]
+            ),
+            "cash_and_equivalents": self._pick_account_value(
+                df_fin, _ACCOUNT_MAP["cash_and_equivalents"]
+            ),
+            "inventory": self._pick_account_value(df_fin, _ACCOUNT_MAP["inventory"]),
+            "accounts_receivable": self._pick_account_value(
+                df_fin, _ACCOUNT_MAP["accounts_receivable"]
+            ),
         }
+
+        # Calculate derived fields
+        # gross_profit = revenue - cost_of_goods_sold
+        if not raw.get("gross_profit") and raw.get("revenue") and raw.get("cost_of_goods_sold"):
+            raw["gross_profit"] = raw["revenue"] - raw["cost_of_goods_sold"]
+
+        # ebitda ≈ operating_income (lower-bound approximation)
+        if not raw.get("ebitda") and raw.get("operating_income"):
+            raw["ebitda"] = raw["operating_income"]
+
+        # free_cash_flow = operating_cash_flow - capital_expenditure
+        if raw.get("operating_cash_flow") and raw.get("capital_expenditure"):
+            raw["free_cash_flow"] = raw["operating_cash_flow"] - abs(raw["capital_expenditure"])
+
+        return raw
 
     def _fetch_fundamentals_sync(
         self, ticker: str, as_of: date, n_quarters: int
