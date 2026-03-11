@@ -36,14 +36,26 @@ jobs:
       - name: Sync dependencies
         run: uv sync --extra all --extra dev
 
-      - name: Run daily batch
+      - name: Run daily batch (KR + US snapshots)
         run: uv run python scripts/run_daily_batch.py
 
       - name: Upload batch artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: market-data-${{ github.run_id }}
+          name: market-data-batch-${{ github.run_id }}
           path: out/
           if-no-files-found: warn
           retention-days: 30
+
+      - name: Upload snapshots to release
+        if: success()
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            artifacts/snapshots/*/**.json
+          tag_name: snapshot-${{ github.event.schedule || 'manual' }}-${{ github.run_id }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

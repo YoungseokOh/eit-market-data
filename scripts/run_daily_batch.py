@@ -122,6 +122,8 @@ def run_daily_batch(
     ticker: str,
     force_snapshot: bool,
     snapshot_profile: str,
+    us_universe: str = "AAPL,MSFT,GOOGL,AMZN,NVDA",
+    skip_us: bool = False,
 ) -> tuple[int, dict[str, object]]:
     run_root = build_run_root(output_root, as_of)
     logs_dir = run_root / "logs"
@@ -201,6 +203,23 @@ def run_daily_batch(
             snapshot.status = snapshot_status
             snapshot.detail = snapshot_detail
 
+    # Build US snapshot (unless skipped)
+    if not skip_us and overall_status != "failed":
+        us_snapshot_cmd = [
+            sys.executable,
+            "scripts/build_us_snapshot.py",
+            "--as-of",
+            as_of.isoformat(),
+            "--universe",
+            us_universe,
+            "--artifacts-root",
+            str(artifacts_dir),
+        ]
+        us_snapshot = run_step("build_us_snapshot", us_snapshot_cmd, logs_dir)
+        step_results.append(us_snapshot)
+        if us_snapshot.status == "failed":
+            overall_status = "degraded"  # US failure is degraded, not failed
+
     ended_at = datetime.now(timezone.utc).isoformat()
     payload = {
         "status": overall_status,
@@ -220,13 +239,18 @@ def run_daily_batch(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run the daily KR market data batch.")
-    parser.add_argument("--as-of", help="Reference date in YYYY-MM-DD. Defaults to previous Seoul business day.")
+    parser = argparse.ArgumentParser(
+        description="Run the daily market data batch (KR + US)."
+    )
+    parser.add_argument(
+        "--as-of",
+        help="Reference date in YYYY-MM-DD. Defaults to previous Seoul business day.",
+    )
     parser.add_argument("--ticker", default="005930", help="Ticker for preflight validation.")
     parser.add_argument(
         "--universe-csv",
         default=str(UNIVERSE_CSV),
-        help="Universe CSV path.",
+        help="Universe CSV path for KR market.",
     )
     parser.add_argument(
         "--output-root",
@@ -244,6 +268,16 @@ def main() -> None:
         choices=["official", "official_enriched", "ci_safe"],
         help="Profile passed through to scripts/build_kr_snapshot.py.",
     )
+    parser.add_argument(
+        "--us-universe",
+        default="AAPL,MSFT,GOOGL,AMZN,NVDA",
+        help="Comma-separated list of US tickers (default: top 5).",
+    )
+    parser.add_argument(
+        "--skip-us",
+        action="store_true",
+        help="Skip US snapshot build (KR only).",
+    )
     args = parser.parse_args()
 
     exit_code, summary = run_daily_batch(
@@ -253,6 +287,8 @@ def main() -> None:
         ticker=args.ticker,
         force_snapshot=args.force_snapshot,
         snapshot_profile=args.snapshot_profile,
+        us_universe=args.us_universe,
+        skip_us=args.skip_us,
     )
     print(
         f"[SUMMARY] status={summary['status']} "
