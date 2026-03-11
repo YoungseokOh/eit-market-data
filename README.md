@@ -57,26 +57,57 @@ See [docs/wsl2-runbook.md](docs/wsl2-runbook.md) for the full runbook.
 - [docs/eit-research-data-requirements.md](docs/eit-research-data-requirements.md)
 - [docs/wsl2-runbook.md](docs/wsl2-runbook.md)
 
-## KR Bundle For `eit-research`
+## Automated Snapshot Generation
 
-GitHub-hosted/CI-safe KR snapshot bundle export:
+### For `eit-research` (Recommended)
+
+**GitHub Actions automatically generates KR + US snapshots monthly.**
+
+Download pre-built snapshots from GitHub releases (no local build needed):
+
+```bash
+# Download latest KR snapshot
+gh release download $(gh release list | head -1 | awk '{print $1}') \
+  --pattern '*kr*' --dir ../eit-market-data/artifacts/snapshots/
+
+# Download latest US snapshot
+gh release download $(gh release list | head -1 | awk '{print $1}') \
+  --pattern '*us*' --dir ../eit-market-data/artifacts/snapshots/
+```
+
+Then use directly:
+
+```bash
+eit build-snapshot 2026-03 --market kr --bundle-dir ../eit-market-data/artifacts/snapshots
+eit build-snapshot 2026-03 --market us --bundle-dir ../eit-market-data/artifacts/snapshots
+```
+
+### Manual Build (Local Development)
+
+Build KR snapshot locally:
 
 ```bash
 python scripts/build_kr_snapshot.py --as-of 2026-03-31 --profile ci_safe --force
 ```
 
-Output files are written under `artifacts/snapshots/YYYY-MM/`:
-
-- `snapshot.json`
-- `metadata.json`
-- `manifest.json`
-- `summary.json`
-
-`eit-research` can consume the bundle with:
+Build US snapshot locally (requires `FRED_API_KEY`, `SEC_EDGAR_USER_AGENT`):
 
 ```bash
-eit build-snapshot 2026-03 --market kr --bundle-dir ../eit-market-data/artifacts/snapshots
+python scripts/build_us_snapshot.py --as-of 2026-02-27 --universe AAPL,MSFT,GOOGL
 ```
+
+Or both together (KR + US):
+
+```bash
+python scripts/run_daily_batch.py --as-of 2026-02-27
+```
+
+Output files are written under `artifacts/snapshots/YYYY-MM/`:
+
+- `snapshot.json` — Point-in-time snapshot data
+- `metadata.json` — Provider metadata and verification info
+- `manifest.json` — File manifest for loading
+- `summary.json` — Build summary and statistics
 
 ## US Market Data
 

@@ -368,10 +368,53 @@ async def test_yfinance_prices():
 
 ## Next Steps for eit-research
 
-1. Install: `pip install -e '../eit-market-data[all]'`
-2. Test: `python ../eit-market-data/scripts/smoke_test_us_providers.py`
-3. Integrate: Use `create_real_providers()` in your pipeline
-4. Build snapshots: `eit build-snapshot 2026-02 --market us`
-5. Backtest with US data alongside KR data
+### Option A: Use Pre-Built Snapshots (Recommended - No API Keys Needed)
+
+GitHub Actions automatically builds KR + US snapshots monthly and publishes them as releases.
+
+```bash
+# 1. Download latest snapshots
+gh release download snapshot-* --dir ./data/snapshots/
+
+# 2. Use directly (no API key setup needed!)
+eit build-snapshot 2026-02 --market us --bundle-dir ./data/snapshots/
+```
+
+**Advantage**: Fast, no API credentials needed, guaranteed compatibility.
+
+### Option B: Build Locally (For Development)
+
+```bash
+# 1. Install package
+pip install -e '../eit-market-data[all]'
+
+# 2. Set API keys (one-time)
+cp ../eit-market-data/.env.example .env
+# → Fill in FRED_API_KEY, SEC_EDGAR_USER_AGENT
+
+# 3. Test setup
+python ../eit-market-data/scripts/smoke_test_us_providers.py
+
+# 4. Build snapshot
+python ../eit-market-data/scripts/build_us_snapshot.py \
+  --as-of 2026-02-27 \
+  --universe AAPL,MSFT,GOOGL
+
+# 5. Use in pipeline
+eit build-snapshot 2026-02 --market us --bundle-dir ../eit-market-data/artifacts/snapshots
+```
+
+**Advantage**: Full control, ability to customize universe, verify data freshness.
+
+### Option C: Batch Build (KR + US Together)
+
+```bash
+# Build both KR and US snapshots in one call
+python ../eit-market-data/scripts/run_daily_batch.py \
+  --as-of 2026-02-27 \
+  --us-universe AAPL,MSFT,GOOGL,AMZN,NVDA
+```
+
+---
 
 See [smoke-test-results.md](smoke-test-results.md) for verification details.
