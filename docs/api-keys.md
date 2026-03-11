@@ -106,6 +106,67 @@ load_dotenv()
 
 `.env` 파일은 반드시 `.gitignore`에 포함시킬 것.
 
+---
+
+## FRED API 키 (`FRED_API_KEY`)
+
+미국 연방준비제도 경제 데이터(Federal Reserve Economic Data) — 금리, 물가, 실업률, VIX 등 매크로 지표 21개
+
+**URL:** https://fred.stlouisfed.org
+
+### 발급 절차
+
+1. https://fred.stlouisfed.org 접속
+2. 상단 "My Account" → "API Keys" 클릭
+3. "Request API Key" 버튼
+4. 이메일 주소 입력 및 약관 동의
+5. 회원가입 확인 이메일 수신 후 로그인
+6. API Key Dashboard에서 키 확인 및 복사
+
+### 직접 신청 링크
+
+https://fred.stlouisfed.org/docs/api/api_key.html
+
+### 주의사항
+
+- **무료**: 가입 및 사용 비용 없음
+- 일일 한도: **120 calls/minute** (내부 rate limiting으로 관리)
+- 계정 1개당 API 키 1개 (재발급 가능)
+- 메이 최근 갱신: 자동
+
+---
+
+## SEC EDGAR User-Agent (`SEC_EDGAR_USER_AGENT`)
+
+미국 증권거래위원회 전자 정보 수집·분석·회수 시스템 — 10-K 연차 보고서, 재무제표, 위험요소 등
+
+**URL:** https://www.sec.gov
+
+### 설정 방법
+
+SEC EDGAR는 API 키 대신 HTTP User-Agent 헤더를 요구합니다:
+
+```bash
+export SEC_EDGAR_USER_AGENT="YourName your@email.com"
+```
+
+**형식**: `"<Name> <email@example.com>"`
+
+예시:
+```bash
+export SEC_EDGAR_USER_AGENT="John Doe john@company.com"
+export SEC_EDGAR_USER_AGENT="EIT Research eit@example.com"
+```
+
+### 주의사항
+
+- **무료**: API 키 발급 없음 (User-Agent만 필요)
+- 요청 속도: **10 requests/second 제한** (내부 semaphore로 관리)
+- User-Agent 없이 요청하면 **403 Forbidden** 반환
+- 식별 정보는 연락 추적용이므로 정확하게 입력
+
+---
+
 ## GitHub Actions Secrets
 
 GitHub Actions로 자동 실행할 때는 `.env` 파일을 업로드하지 말고 repository secrets에 아래 이름으로 저장:
@@ -117,7 +178,9 @@ FRED_API_KEY
 SEC_EDGAR_USER_AGENT
 ```
 
-현재 일일 배치(`scripts/run_daily_batch.py`)는 KR preflight, KR crawl, KR snapshot 기준이라서 실제 필수 secret은 `DART_API_KEY`, `ECOS_API_KEY`다. `FRED_API_KEY`, `SEC_EDGAR_USER_AGENT`는 향후 US provider 자동화에 대비한 이름으로 유지한다.
+현재 구성:
+- **KR providers**: DART_API_KEY, ECOS_API_KEY 필수
+- **US providers**: FRED_API_KEY, SEC_EDGAR_USER_AGENT 필수
 
 ---
 

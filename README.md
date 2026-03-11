@@ -78,6 +78,52 @@ Output files are written under `artifacts/snapshots/YYYY-MM/`:
 eit build-snapshot 2026-03 --market kr --bundle-dir ../eit-market-data/artifacts/snapshots
 ```
 
+## US Market Data
+
+### Quick Start
+
+**Requirements**:
+- `FRED_API_KEY` (free from https://fred.stlouisfed.org)
+- `SEC_EDGAR_USER_AGENT` (format: "Name your@email.com")
+
+**Installation**:
+
+```bash
+pip install -e '.[real-data]'  # US providers only
+pip install -e '.[all]'        # KR + US providers
+```
+
+**Smoke Test** (verify your setup):
+
+```bash
+python scripts/smoke_test_us_providers.py
+```
+
+**Usage**:
+
+```python
+from eit_market_data.snapshot import SnapshotBuilder, create_real_providers
+import asyncio
+
+providers = create_real_providers()  # YFinance + FRED + EDGAR
+builder = SnapshotBuilder(**providers)
+
+snapshot = await builder.build(
+    month="2026-02",
+    universe=["AAPL", "MSFT", "GOOGL"]
+)
+```
+
+**Data Coverage** (as of 2026-02-27):
+- **Prices**: 300 daily OHLCV bars per ticker
+- **Fundamentals**: 4 quarters (income, balance sheet, cash flow)
+- **Macro**: 21 indicators (rates, inflation, growth, market risk)
+- **Filings**: 10-K text (business, risks, MD&A, governance)
+- **News**: Up to 15 items (30-day window)
+- **Sectors & Benchmarks**: S&P 500, NASDAQ-100
+
+See [docs/us-developer-guide.md](docs/us-developer-guide.md) for provider details and point-in-time filtering.
+
 ## GitHub Actions Automation
 
 - Scheduled workflow: `.github/workflows/daily-market-data.yml`
