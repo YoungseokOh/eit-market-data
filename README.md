@@ -82,9 +82,16 @@ eit build-snapshot 2026-03 --market kr --bundle-dir ../eit-market-data/artifacts
 
 ### Quick Start
 
+**Setup** (one-time):
+
+```bash
+# Copy template and fill in your keys
+cp .env.example .env
+```
+
 **Requirements**:
-- `FRED_API_KEY` (free from https://fred.stlouisfed.org)
-- `SEC_EDGAR_USER_AGENT` (format: "Name your@email.com")
+- `FRED_API_KEY` (free from https://fred.stlouisfed.org/docs/api/api_key.html)
+- `SEC_EDGAR_USER_AGENT` (format: "Name your@email.com", no registration needed)
 
 **Installation**:
 
