@@ -7,11 +7,18 @@ import logging
 import os
 import re
 from datetime import date
+from pathlib import Path
 from typing import Any
 
 from eit_market_data.schemas.snapshot import FilingData, FundamentalData, QuarterlyFinancials
 
 logger = logging.getLogger(__name__)
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
+_DART_CACHE_DIR = _PROJECT_ROOT / "data" / "dart_cache"
+_FINSTATE_TTL = 120 * 86_400   # quarterly statements are final once filed
+_REPORT_LIST_TTL = 30 * 86_400  # new filings may appear; refresh monthly
+_DOC_TTL = 365 * 86_400        # documents never change after filing
 
 _ACCOUNT_MAP: dict[str, list[str]] = {
     "revenue": ["매출액", "영업수익"],
@@ -354,27 +361,63 @@ class DartProvider:
         self._corp_list: Any = None
         self._semaphore = asyncio.Semaphore(2)
 
+        try:
+            import diskcache
+            _DART_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            self._cache: Any = diskcache.Cache(str(_DART_CACHE_DIR))
+        except ImportError:
+            self._cache = None
+
     async def fetch_fundamentals(
         self, ticker: str, as_of: date, n_quarters: int = 8
     ) -> FundamentalData:
         norm_ticker = _normalize_ticker(ticker)
+        cache_key = f"fundamental:{norm_ticker}:{as_of.strftime('%Y%m')}"
+        cached = self._cache_get(cache_key)
+        if cached is not None and isinstance(cached, FundamentalData) and cached.quarters:
+            return cached
+
         async with self._semaphore:
             try:
-                return await asyncio.to_thread(
+                result = await asyncio.to_thread(
                     self._fetch_fundamentals_sync, norm_ticker, as_of, n_quarters
                 )
             except Exception as e:
                 logger.warning("DART fundamentals fetch failed for %s: %s", norm_ticker, e)
-                return FundamentalData(ticker=norm_ticker)
+                result = FundamentalData(ticker=norm_ticker)
+
+        if result.quarters:
+            self._cache_set(cache_key, result, _FINSTATE_TTL)
+        elif not result.quarters:
+            # API returned empty — try any stale entry for this ticker
+            stale = self._cache_stale(f"fundamental:{norm_ticker}:")
+            if stale is not None and isinstance(stale, FundamentalData) and stale.quarters:
+                logger.warning("DART API returned empty; using stale fundamentals cache for %s", norm_ticker)
+                return stale
+        return result
 
     async def fetch_filing(self, ticker: str, as_of: date) -> FilingData:
         norm_ticker = _normalize_ticker(ticker)
+        cache_key = f"filing:{norm_ticker}:{as_of.strftime('%Y%m')}"
+        cached = self._cache_get(cache_key)
+        if cached is not None and isinstance(cached, FilingData) and cached.business_overview:
+            return cached
+
         async with self._semaphore:
             try:
-                return await asyncio.to_thread(self._fetch_filing_sync, norm_ticker, as_of)
+                result = await asyncio.to_thread(self._fetch_filing_sync, norm_ticker, as_of)
             except Exception as e:
                 logger.warning("DART filing fetch failed for %s: %s", norm_ticker, e)
-                return FilingData(ticker=norm_ticker)
+                result = FilingData(ticker=norm_ticker)
+
+        if result.business_overview:
+            self._cache_set(cache_key, result, _DOC_TTL)
+        elif not result.business_overview:
+            stale = self._cache_stale(f"filing:{norm_ticker}:")
+            if stale is not None and isinstance(stale, FilingData) and stale.business_overview:
+                logger.warning("DART API returned empty; using stale filing cache for %s", norm_ticker)
+                return stale
+        return result
 
     # ------------------------------------------------------------------
     # Fundamentals
@@ -424,8 +467,43 @@ class DartProvider:
             self._corp_cache[ticker] = None
             return None
 
+    def _cache_get(self, key: str) -> Any:
+        if self._cache is None:
+            return None
+        try:
+            return self._cache.get(key)
+        except Exception:
+            return None
+
+    def _cache_set(self, key: str, value: Any, ttl: int) -> None:
+        if self._cache is None:
+            return
+        try:
+            self._cache.set(key, value, expire=ttl)
+        except Exception:
+            pass
+
+    def _cache_stale(self, prefix: str) -> Any:
+        """Return the first expired/evicted entry whose key starts with prefix."""
+        if self._cache is None:
+            return None
+        try:
+            for key in self._cache:
+                if isinstance(key, str) and key.startswith(prefix):
+                    val = self._cache.get(key)
+                    if val is not None:
+                        return val
+        except Exception:
+            pass
+        return None
+
     def _fetch_finstate(self, corp_code: str, year: str, reprt_code: str):  # noqa: ANN202
         for fs_div in ("CFS", "OFS"):
+            cache_key = f"finstate:{corp_code}:{year}:{reprt_code}:{fs_div}"
+            cached = self._cache_get(cache_key)
+            if cached is not None:
+                return cached
+
             try:
                 df = self._dart.finstate(corp_code, year, reprt_code=reprt_code, fs_div=fs_div)
             except TypeError:
@@ -438,7 +516,14 @@ class DartProvider:
                 df = None
 
             if df is not None and not df.empty:
+                self._cache_set(cache_key, df, _FINSTATE_TTL)
                 return df
+
+        # All API calls failed — try any stale cache entry for this report
+        stale = self._cache_stale(f"finstate:{corp_code}:{year}:{reprt_code}:")
+        if stale is not None:
+            logger.warning("DART API unavailable; using stale finstate cache for %s %s %s", corp_code, year, reprt_code)
+            return stale
         return None
 
     def _pick_account_value(self, df: Any, candidates: list[str]) -> float | None:
@@ -484,12 +569,29 @@ class DartProvider:
         return None
 
     def _fetch_report_list(self, corp_code: str, as_of: date):  # noqa: ANN202
-        return self._dart.list(
-            corp_code,
-            start=f"{max(as_of.year - 10, 2000)}0101",
-            end=_date_to_yyyymmdd(as_of),
-            kind="A",
-        )
+        cache_key = f"reports:{corp_code}:{as_of.strftime('%Y%m')}"
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached
+
+        try:
+            result = self._dart.list(
+                corp_code,
+                start=f"{max(as_of.year - 10, 2000)}0101",
+                end=_date_to_yyyymmdd(as_of),
+                kind="A",
+            )
+        except Exception as exc:
+            # API unavailable — try most recent stale entry for this corp
+            stale = self._cache_stale(f"reports:{corp_code}:")
+            if stale is not None:
+                logger.warning("DART API unavailable; using stale report list for %s: %s", corp_code, exc)
+                return stale
+            raise
+
+        if result is not None and not result.empty:
+            self._cache_set(cache_key, result, _REPORT_LIST_TTL)
+        return result
 
     def _build_raw_quarter_data(self, df_fin: Any) -> dict[str, float | None]:
         raw = {
@@ -647,12 +749,17 @@ class DartProvider:
             return FilingData(ticker=ticker, filing_date=filing_date, filing_type="사업보고서")
 
         try:
-            doc = self._dart.document(rcept_no)
+            doc_cache_key = f"doc:{rcept_no}"
+            doc = self._cache_get(doc_cache_key)
+            if doc is None:
+                doc = self._dart.document(rcept_no)
+                if doc:
+                    self._cache_set(doc_cache_key, doc, _DOC_TTL)
             if isinstance(doc, bytes):
                 doc_text = doc.decode("utf-8", errors="ignore")
             else:
-                doc_text = str(doc)
-            sections = _extract_sections(doc_text)
+                doc_text = str(doc) if doc else ""
+            sections = _extract_sections(doc_text) if doc_text else {}
         except Exception as e:
             logger.warning("DART document fetch/parse failed for %s: %s", ticker, e)
             sections = {}

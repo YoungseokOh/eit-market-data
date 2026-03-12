@@ -14,6 +14,9 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
+from dotenv import load_dotenv
+load_dotenv(PROJECT_ROOT / ".env")
+
 UNIVERSE_CSV = PROJECT_ROOT / "universes/kr_universe.csv"
 ARTIFACTS_ROOT = PROJECT_ROOT / "artifacts"
 MONTHLY_SNAPSHOT_FILENAME = "snapshot.json"

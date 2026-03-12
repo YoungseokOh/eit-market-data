@@ -97,7 +97,10 @@ class CompositeKrFundamentalProvider:
         return {"last_close_price": bars[-1].close}
 
     def _fetch_market_snapshot_sync(self, ticker: str, as_of: date) -> dict[str, float | None]:
-        trade_date = latest_krx_trading_day(ticker, as_of)
+        # Clamp to today so future decision dates (end-of-month) can still
+        # fetch the most recently available market data.
+        effective_as_of = min(as_of, date.today())
+        trade_date = latest_krx_trading_day(ticker, effective_as_of)
         if trade_date is None:
             return {
                 "last_close_price": None,

@@ -25,10 +25,12 @@ INDEX_CODE_NAMES: dict[str, str] = {
     "1028": "KOSPI200",
 }
 _INDEX_FDR_SYMBOLS: dict[str, str] = {
-    "1001": "KS11",
-    "2001": "KQ11",
-    "1028": "KS200",
+    "1001": "^KS11",
+    "2001": "^KQ11",
+    "1028": "^KS200",
 }
+CAP_MONTHLY_DIR = _PROJECT_ROOT / "data/market/cap"
+_LOCAL_CAP_MONTHLY_MAX_GAP_DAYS = 45
 _PUBLIC_MARKET_CAP_MAX_AGE_DAYS = 45
 _LOCAL_CAP_DAILY_MAX_GAP_DAYS = 7
 
@@ -227,11 +229,83 @@ def fetch_market_ticker_list(as_of: date, market: str) -> list[str]:
     return stock.get_market_ticker_list(date_to_yyyymmdd(as_of), market=market)
 
 
+def _load_local_monthly_cap_snapshot(
+    as_of: date,
+    market: str,
+    snapshot_dir: Path | None = None,
+) -> Any | None:
+    """Load the latest monthly cap parquet on or before as_of from data/market/cap/."""
+    snapshot_dir = snapshot_dir or CAP_MONTHLY_DIR
+    if not snapshot_dir.exists():
+        return None
+
+    prefix = market.upper()
+    candidates: list[tuple[date, Path]] = []
+    for path in snapshot_dir.glob(f"{prefix}_*.parquet"):
+        stem = path.stem
+        token = stem.rsplit("_", 1)[-1]
+        for fmt in ("%Y%m%d", "%Y%m"):
+            try:
+                parsed = datetime.strptime(token, fmt).date()
+                break
+            except ValueError:
+                continue
+        else:
+            continue
+        if parsed <= as_of:
+            candidates.append((parsed, path))
+
+    if not candidates:
+        return None
+
+    snapshot_date, path = max(candidates, key=lambda item: item[0])
+    gap_days = (as_of - snapshot_date).days
+    if gap_days > _LOCAL_CAP_MONTHLY_MAX_GAP_DAYS:
+        logger.warning(
+            "Local monthly cap snapshot for %s may be stale (%d days) for %s: %s — using anyway",
+            market,
+            gap_days,
+            as_of,
+            path.name,
+        )
+
+    import pandas as pd
+
+    frame = pd.read_parquet(path)
+    if frame is None or frame.empty:
+        return None
+
+    # Normalise to the standard format: index=종목코드, columns include 시가총액 and 종가
+    frame = frame.reset_index(drop=True)
+    if "ticker" in frame.columns:
+        frame = frame.rename(columns={"ticker": "종목코드"})
+    if "종목코드" not in frame.columns:
+        return None
+    frame["종목코드"] = frame["종목코드"].map(lambda v: normalize_ticker(str(v)))
+    # Keep only the latest row per ticker (in case of duplicates)
+    frame = frame.sort_values("source_trade_date", ascending=True).drop_duplicates(
+        subset=["종목코드"], keep="last"
+    ) if "source_trade_date" in frame.columns else frame.drop_duplicates(subset=["종목코드"])
+    return frame.set_index("종목코드", drop=True)
+
+
 def fetch_market_cap_frame(as_of: date, market: str) -> Any | None:
-    """Fetch market-cap snapshot from local daily cache or recent public listings."""
+    """Fetch market-cap snapshot.
+
+    Fallback order:
+    1. Local daily cache (data/market/cap_daily/)
+    2. Local monthly cache (data/market/cap/)
+    3. FDR public StockListing (within 45 days)
+    4. pykrx KRX authenticated path
+    """
     local_frame = _load_local_market_cap_snapshot(as_of, market)
     if local_frame is not None and not local_frame.empty:
         return local_frame
+
+    monthly_frame = _load_local_monthly_cap_snapshot(as_of, market)
+    if monthly_frame is not None and not monthly_frame.empty:
+        logger.info("Using local monthly cap snapshot for %s as of %s", market, as_of)
+        return monthly_frame
 
     age_days = (date.today() - as_of).days
     if age_days > _PUBLIC_MARKET_CAP_MAX_AGE_DAYS:

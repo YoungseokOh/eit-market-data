@@ -24,6 +24,9 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
+from dotenv import load_dotenv
+load_dotenv(PROJECT_ROOT / ".env")
+
 from eit_market_data.snapshot import SnapshotBuilder, SnapshotConfig, create_real_providers
 
 logging.basicConfig(

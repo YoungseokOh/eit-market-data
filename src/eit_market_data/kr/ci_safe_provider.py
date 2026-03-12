@@ -11,7 +11,7 @@ from typing import Any
 
 import numpy as np
 
-from eit_market_data.kr.market_helpers import normalize_ticker
+from eit_market_data.kr.market_helpers import fetch_index_ohlcv_frame, normalize_ticker
 from eit_market_data.schemas.snapshot import (
     FilingData,
     FundamentalData,
@@ -199,6 +199,43 @@ class NullMacroProvider:
     async def fetch_macro(self, as_of: date) -> MacroData:
         _ = as_of
         return MacroData()
+
+
+class FdrBenchmarkProvider:
+    """Fetch Korean benchmark (KOSPI/KOSDAQ) index prices via FinanceDataReader."""
+
+    _DEFAULT_INDEX = "1001"  # KOSPI
+
+    async def fetch_benchmark(self, as_of: date, lookback_days: int = 300) -> list[PriceBar]:
+        start = as_of - timedelta(days=lookback_days + 60)
+        try:
+            frame, _source = await asyncio.to_thread(
+                fetch_index_ohlcv_frame,
+                self._DEFAULT_INDEX,
+                start,
+                as_of,
+            )
+        except Exception as exc:
+            logger.warning("FDR benchmark fetch failed: %s", exc)
+            return []
+        if frame is None or frame.empty:
+            return []
+        bars: list[PriceBar] = []
+        for idx, row in frame.iterrows():
+            bar_date = idx.date() if hasattr(idx, "date") else idx
+            if not isinstance(bar_date, date) or bar_date > as_of:
+                continue
+            bars.append(
+                PriceBar(
+                    date=bar_date,
+                    open=round(float(row.get("Open", 0) or 0), 2),
+                    high=round(float(row.get("High", 0) or 0), 2),
+                    low=round(float(row.get("Low", 0) or 0), 2),
+                    close=round(float(row.get("Close", 0) or 0), 2),
+                    volume=float(row.get("Volume", 0) or 0),
+                )
+            )
+        return bars[-lookback_days:]
 
 
 class NullBenchmarkProvider:

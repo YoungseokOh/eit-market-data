@@ -17,6 +17,9 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
+from dotenv import load_dotenv
+load_dotenv(PROJECT_ROOT / ".env")
+
 from eit_market_data.kr.ecos_provider import EcosMacroProvider
 from eit_market_data.kr.fundamental_provider import CompositeKrFundamentalProvider
 from eit_market_data.kr.market_helpers import (
