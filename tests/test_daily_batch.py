@@ -101,14 +101,57 @@ def test_assess_crawl_outputs_reports_missing_categories(tmp_path: Path) -> None
         Path("scripts/run_daily_batch.py"),
         "run_daily_batch_outputs_test",
     )
-    (tmp_path / "market/ohlcv").mkdir(parents=True)
-    (tmp_path / "market/ohlcv/005930.parquet").write_text("x")
+    (tmp_path / "market/cap_daily").mkdir(parents=True)
+    (tmp_path / "market/cap_daily/KOSPI_20260331.parquet").write_text("x")
 
     missing = module.assess_crawl_outputs(tmp_path)
 
-    assert "market/ohlcv" not in missing
-    assert "market/cap" in missing
+    assert "market/cap_daily" not in missing
     assert "index/ohlcv" in missing
+
+
+def test_run_daily_batch_uses_fallback_crawler(monkeypatch, tmp_path: Path) -> None:
+    module = _load_module(
+        Path("scripts/run_daily_batch.py"),
+        "run_daily_batch_fallback_crawler_test",
+    )
+    seen_commands: list[list[str]] = []
+
+    def fake_run_step(name, command, log_dir):  # noqa: ANN001, ANN202
+        seen_commands.append(command)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        (log_dir / f"{name}.log").write_text(name)
+        return module.StepResult(
+            name=name,
+            status="ok",
+            return_code=0,
+            command=command,
+            log_path=module.display_path(log_dir / f"{name}.log"),
+        )
+
+    monkeypatch.setattr(module, "run_step", fake_run_step)
+    monkeypatch.setattr(module, "build_run_root", lambda base_dir, as_of: base_dir / "run-1")
+    monkeypatch.setattr(module, "assess_crawl_outputs", lambda data_dir: [])
+    monkeypatch.setattr(module, "inspect_snapshot_step", lambda artifacts_dir, as_of: ("ok", ""))
+
+    exit_code, summary = module.run_daily_batch(
+        as_of=date(2026, 3, 31),
+        output_root=tmp_path,
+        universe_csv=Path("universes/kr_universe.csv"),
+        ticker="005930",
+        force_snapshot=True,
+        snapshot_profile="official",
+    )
+
+    assert exit_code == 0
+    assert summary["status"] == "ok"
+    crawl_command = next(
+        command
+        for command in seen_commands
+        if any("crawl_kr_data_fallback.py" in part for part in command)
+    )
+    assert "--start" in crawl_command
+    assert "--end" in crawl_command
 
 
 def test_build_kr_snapshot_summary_tracks_news_population(tmp_path: Path) -> None:

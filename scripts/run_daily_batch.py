@@ -87,8 +87,7 @@ def write_summary(path: Path, payload: dict[str, object]) -> None:
 
 def assess_crawl_outputs(data_dir: Path) -> list[str]:
     expected = {
-        "market/ohlcv": "market/ohlcv/*.parquet",
-        "market/cap": "market/cap/*.parquet",
+        "market/cap_daily": "market/cap_daily/*.parquet",
         "market/fundamental": "market/fundamental/*.parquet",
         "index/ohlcv": "index/ohlcv/*.parquet",
         "market/sector": "market/sector/*.parquet",
@@ -154,11 +153,13 @@ def run_daily_batch(
 
     if overall_status != "failed":
         crawl = run_step(
-            "crawl_kr_data",
+            "crawl_kr_data_fallback",
             [
                 sys.executable,
-                "scripts/crawl_kr_data.py",
-                "--as-of",
+                "scripts/crawl_kr_data_fallback.py",
+                "--start",
+                f"{as_of.year}-01-01",
+                "--end",
                 as_of.isoformat(),
                 "--universe-csv",
                 str(universe_csv),

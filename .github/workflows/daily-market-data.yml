@@ -3,9 +3,10 @@ name: Daily Market Data
 on:
   schedule:
     - cron: "30 22 * * 0-4"
+  workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: daily-market-data
@@ -49,11 +50,11 @@ jobs:
           retention-days: 30
 
       - name: Upload snapshots to release
-        if: success()
+        if: success() && hashFiles('out/*/artifacts/snapshots/*/*.json') != ''
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            artifacts/snapshots/*/**.json
+            out/*/artifacts/snapshots/*/*.json
           tag_name: snapshot-${{ github.event.schedule || 'manual' }}-${{ github.run_id }}
           draft: false
           prerelease: false

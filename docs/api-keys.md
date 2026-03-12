@@ -54,7 +54,8 @@ https://opendart.fss.or.kr/uss/umt/EgovMberInsertView.do
 
 ## KRX 로그인 세션 (`KRX Data Marketplace`)
 
-KRX 지수/시장 전체 데이터는 더 이상 API 키가 아니라 **브라우저 로그인 세션**이 필요합니다.
+기본 KR 런타임은 public `FinanceDataReader` 경로를 사용하므로 KRX 로그인 세션이 없어도 동작합니다.
+이 세션은 현재 **수동 진단/비교용**입니다.
 
 이 프로젝트는 로컬/WSL 기준으로 아래 스크립트로 KRX 세션 쿠키를 생성합니다:
 
@@ -80,11 +81,13 @@ powershell -ExecutionPolicy Bypass -File scripts\windows_krx_setup_and_probe.ps1
 ~/.cache/eit-market-data/krx-profile/cookies.json
 ```
 
-동작 방식:
+사용 목적:
 
 - Chromium 브라우저가 열리면 KRX Data Marketplace에 직접 로그인
 - 로그인 완료 후 `JSESSIONID` 등 세션 쿠키를 JSON으로 저장
-- 이후 `preflight`, `crawl`, `fetch_pykrx_all`은 이 쿠키를 재사용
+- 이후 `probe_fdr_krx_session.py` 같은 수동 진단 스크립트에서 재사용
+
+기본 배치와 snapshot build는 이 세션을 전제로 하지 않습니다.
 
 주의사항:
 
@@ -192,7 +195,8 @@ SEC_EDGAR_USER_AGENT
 ```
 
 현재 구성:
-- **KR providers**: DART_API_KEY, ECOS_API_KEY 필수
+- **KR base runtime**: KRX 로그인 불필요
+- **KR enrichment**: DART_API_KEY, ECOS_API_KEY 권장
 - **US providers**: FRED_API_KEY, SEC_EDGAR_USER_AGENT 필수
 
 ---
