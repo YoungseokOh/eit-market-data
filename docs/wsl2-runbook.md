@@ -47,6 +47,10 @@ When you enter `/home/seok436/projects/eit-market-data`, it will:
 - run `uv sync --extra all --extra dev` when the venv is missing or stale
 - activate `.venv`
 - load `.env`
+- if `/mnt/c/Users/$USER/.cache/eit-market-data/krx-profile/cookies.json` exists,
+  export `EIT_KRX_COOKIE_PATH` and `EIT_KRX_PROFILE_DIR` to reuse the Windows KRX session
+
+Do not commit `cookies.json` into the repository. It is a live authenticated session artifact.
 
 ## 3. Post-reboot verification
 

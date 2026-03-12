@@ -90,6 +90,7 @@ powershell -ExecutionPolicy Bypass -File scripts\windows_krx_setup_and_probe.ps1
 
 - 이 세션은 KRX 로그인 만료 정책에 따라 다시 갱신이 필요할 수 있음
 - 쿠키 파일은 비밀정보이므로 외부 공유 금지
+- 쿠키 파일을 저장소나 커밋에 포함하지 말 것
 - 현재 1차 구현은 로컬/WSL 우선이며, GitHub Actions 무인 로그인은 범위 밖
 
 ---

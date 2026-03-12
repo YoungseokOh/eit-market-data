@@ -14,13 +14,35 @@ $RepoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $RepoRoot
 
 function Get-BasePython {
-    if (Get-Command py -ErrorAction SilentlyContinue) {
-        return @("py", "-3")
+    foreach ($CandidateCommand in @(
+        @("py", "-3"),
+        @("python"),
+        @("python3")
+    )) {
+        $Exe = $CandidateCommand[0]
+        $Args = @()
+        if ($CandidateCommand.Length -gt 1) {
+            $Args = $CandidateCommand[1..($CandidateCommand.Length - 1)]
+        }
+        if (-not (Get-Command $Exe -ErrorAction SilentlyContinue)) {
+            continue
+        }
+
+        try {
+            & $Exe @Args --version *> $null
+            if ($LASTEXITCODE -eq 0) {
+                return ,$CandidateCommand
+            }
+        }
+        catch {
+            continue
+        }
     }
-    if (Get-Command python -ErrorAction SilentlyContinue) {
-        return @("python")
-    }
-    throw "Python launcher not found. Install Python 3.11+ and ensure 'py' or 'python' is on PATH."
+
+    throw (
+        "Python 3.11+ was not found. Install Python from python.org with PATH enabled, or install the Python Launcher " +
+        "for Windows so 'py -3' is available."
+    )
 }
 
 function Invoke-Checked {
@@ -42,12 +64,12 @@ function Invoke-Checked {
     }
 }
 
-$BasePython = Get-BasePython
+$BasePython = @(Get-BasePython)
 $VenvPython = Join-Path $RepoRoot ".venv\Scripts\python.exe"
 $VenvPlaywright = Join-Path $RepoRoot ".venv\Scripts\playwright.exe"
 
 if (-not (Test-Path $VenvPython)) {
-    Invoke-Checked ($BasePython + @("-m", "venv", ".venv"))
+    Invoke-Checked -Command ($BasePython + @("-m", "venv", ".venv"))
 }
 
 Invoke-Checked @($VenvPython, "-m", "pip", "install", "--upgrade", "pip")

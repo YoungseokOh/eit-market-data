@@ -29,6 +29,11 @@ python scripts/krx_login.py
 ~/.cache/eit-market-data/krx-profile/cookies.json
 ```
 
+세션 쿠키는 인증 정보이므로 저장소에 커밋하면 안 됩니다. WSL2에서는 Windows에서 생성한
+쿠키 파일을 그대로 재사용하세요. 이 repo의 `scripts/auto_shell.sh`는 WSL에서 repo에
+들어올 때 `/mnt/c/Users/$USER/.cache/eit-market-data/krx-profile/cookies.json` 이 있으면
+`EIT_KRX_COOKIE_PATH` 와 `EIT_KRX_PROFILE_DIR` 를 자동으로 맞춥니다.
+
 Windows에서 이 repo를 직접 열어 한 번에 준비, 로그인, FDR probe까지 실행하려면:
 
 ```powershell
@@ -63,6 +68,7 @@ This checks:
 - Apply the known-good DNS config with `scripts/apply_wsl_dns_config.sh`
 - Run `wsl --shutdown` from Windows after changing `/etc/wsl.conf`
 - `.bashrc` sources `scripts/auto_shell.sh`, which activates `.venv` and loads `.env`
+- WSL2에서는 Windows에서 만든 KRX 쿠키를 `/mnt/c/Users/$USER/.cache/eit-market-data/krx-profile/cookies.json` 경로로 재사용할 수 있음
 
 See [docs/wsl2-runbook.md](docs/wsl2-runbook.md) for the full runbook.
 
