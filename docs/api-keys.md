@@ -29,6 +29,32 @@ https://opendart.fss.or.kr/uss/umt/EgovMberInsertView.do
 - 1인 1키 정책 (중복 발급 제한)
 - 시스템 점검 시간에 API 일시 중단 (점검 공지 확인 필요)
 
+### IP 임시 차단 — 반복 요청 금지
+
+`opendart.fss.or.kr`는 짧은 시간 내 대량 연결 시도를 IP 단위로 임시 차단한다.
+
+**증상**: `Connection reset by peer` / `RemoteDisconnected` / `curl: (56)` / HTTP 000
+**원인**: 디버깅이나 테스트 목적으로 수십 회 연속 요청 → KT 망 IP 당일 차단
+**해제**: 자정(00:00 KST) 이후 자동 해제
+**주의**: WSL2와 같은 외부 IP를 쓰는 Windows Python도 동시에 차단됨
+
+**대응 원칙**:
+1. 접속 확인은 **1회**만 시도한다. 실패해도 재시도하지 않는다.
+2. 차단 시 `python scripts/seed_dart_cache.py` 로 기존 스냅샷에서 캐시를 시딩한다.
+3. 캐시 시딩 후 `--profile ci_safe` 빌드는 DART 없이도 동작한다.
+4. 뚫으려 하지 않는다. 자정까지 기다리거나 GitHub Actions를 사용한다.
+
+```bash
+# 접속 상태 단일 확인 (딱 1번만)
+curl -s --max-time 10 \
+  "https://opendart.fss.or.kr/api/company.json?crtfc_key=${DART_API_KEY}&corp_code=00126380" \
+  | python3 -m json.tool | head -5
+
+# 차단 상태일 때 오프라인 빌드
+python scripts/seed_dart_cache.py
+python scripts/build_kr_snapshot.py --profile ci_safe --as-of $(date +%Y-%m-%d)
+```
+
 ---
 
 ## ECOS API 키 (`ECOS_API_KEY`)

@@ -73,7 +73,41 @@ Exit codes:
 - `1`: at least one hard failure
 - `2`: no hard failures, but at least one degraded dependency
 
-## 4. Current caveats
+## 4. DART API — IP 차단 주의
+
+**`opendart.fss.or.kr`에 단시간 내 반복 요청하면 IP가 당일 차단된다.**
+
+증상: `Connection reset by peer` / `RemoteDisconnected` / `curl: (56)` / HTTP 000
+
+### 접속 안 될 때 절차
+
+1. **접속 상태 단 1회 확인** — 실패하면 즉시 중단하고 재시도하지 않는다:
+   ```bash
+   curl -s --max-time 10 \
+     "https://opendart.fss.or.kr/api/company.json?crtfc_key=${DART_API_KEY}&corp_code=00126380" \
+     | python3 -m json.tool | head -5
+   ```
+
+2. **오프라인 빌드로 전환** — 기존 스냅샷에서 캐시 시딩 후 ci_safe 빌드:
+   ```bash
+   python scripts/seed_dart_cache.py
+   python scripts/build_kr_snapshot.py --profile ci_safe --as-of $(date +%Y-%m-%d)
+   ```
+
+3. **차단 해제 대기** — 자정(00:00 KST) 이후 자동 해제. 강제로 뚫으려 하지 않는다.
+
+### 정상 작동 확인 (차단 해제 후)
+
+```bash
+rm -rf data/dart_cache/   # 캐시 제거 — fresh 테스트
+python scripts/build_kr_snapshot.py --profile ci_safe --as-of $(date +%Y-%m-%d) --force
+# fundamentals > 0, filings > 0 이면 DART 직접 접속 성공
+cat artifacts/snapshots/$(date +%Y-%m)/manifest.json | python3 -m json.tool | grep -A12 field_coverage
+```
+
+상세 규칙: `docs/api-keys.md` DART 섹션 및 `.claude/rules/dart-api-limits.md`
+
+## 5. Current caveats
 
 - Default KR runtime uses FinanceDataReader public routes and does not require KRX login cookies.
 - KRX login scripts remain available only for manual diagnostics and legacy experiments.
@@ -81,3 +115,4 @@ Exit codes:
 - `scripts/crawl_kr_data_fallback.py` stores FnGuide monthly cap snapshots at each month's last business day.
 - For replay builds older than the public FDR 45-day window, generate `cap_daily` first, then run `scripts/build_kr_snapshot.py`.
 - ECOS monthly and quarterly series must be fetched with verified item codes and full-page pagination; this repository now handles that internally.
+- DART `data/dart_cache/` (diskcache) persists `FundamentalData`/`FilingData` objects; seed with `scripts/seed_dart_cache.py` when DART API is inaccessible.
