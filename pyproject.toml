@@ -23,6 +23,7 @@ real-data = [
     "beautifulsoup4>=4.12",
 ]
 kr = [
+    "beautifulsoup4>=4.12",
     "pykrx>=1.2.4",
     "opendartreader>=0.2.3",
     "finance-datareader",

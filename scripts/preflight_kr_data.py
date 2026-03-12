@@ -32,9 +32,11 @@ from eit_market_data.kr.market_helpers import (
     load_sector_snapshot_map,
 )
 from eit_market_data.kr.pykrx_provider import PykrxProvider
+from eit_market_data.kr.naver_news_provider import NaverNewsProvider
 
 HOSTS = (
     "data.krx.co.kr",
+    "finance.naver.com",
     "opendart.fss.or.kr",
     "ecos.bok.or.kr",
 )
@@ -93,6 +95,38 @@ def _check_dns(host: str) -> CheckResult:
 
     addresses = sorted({info[4][0] for info in infos})
     return CheckResult(f"dns:{host}", "ok", ", ".join(addresses[:3]))
+
+
+def _probe_naver_news_links(ticker: str) -> int:
+    try:
+        import requests
+        from bs4 import BeautifulSoup
+    except ImportError as exc:
+        raise RuntimeError("requests/BeautifulSoup are required for Naver news preflight") from exc
+
+    response = requests.get(
+        f"https://finance.naver.com/item/main.nhn?code={ticker}",
+        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=10,
+    )
+    response.raise_for_status()
+    content_type = str(response.headers.get("content-type", "")).lower()
+    if "charset=" in content_type:
+        response.encoding = content_type.split("charset=", 1)[1].split(";", 1)[0].strip()
+    elif getattr(response, "apparent_encoding", ""):
+        response.encoding = response.apparent_encoding
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    container = soup.select_one("div.sub_section.news_section")
+    if container is None:
+        return 0
+
+    links = {
+        str(anchor.get("href", "")).strip()
+        for anchor in container.select('span.txt > a[href*="/item/news_read.naver"]')
+        if str(anchor.get("href", "")).strip()
+    }
+    return len(links)
 
 
 async def _check_market_stack(as_of: date, ticker: str) -> list[CheckResult]:
@@ -333,6 +367,44 @@ async def _check_ecos(as_of: date) -> CheckResult:
     return CheckResult("ecos", "ok", f"keys={','.join(sorted(macro_keys))}")
 
 
+async def _check_news(as_of: date, ticker: str) -> CheckResult:
+    provider = NaverNewsProvider()
+    try:
+        items = await provider.fetch_news(ticker, as_of)
+    except Exception as exc:
+        return CheckResult("naver:news", "failed", str(exc))
+
+    valid_items = [
+        item
+        for item in items
+        if item.headline and item.date is not None and item.date <= as_of
+    ]
+    if valid_items:
+        latest = max(item.date for item in valid_items)
+        return CheckResult(
+            "naver:news",
+            "ok",
+            f"{ticker} items={len(valid_items)} latest={latest.isoformat()}",
+        )
+
+    try:
+        raw_links = _probe_naver_news_links(ticker)
+    except Exception as exc:
+        return CheckResult("naver:news", "failed", f"raw_probe_failed={exc}")
+
+    if raw_links > 0:
+        return CheckResult(
+            "naver:news",
+            "failed",
+            f"{ticker} provider_returned_no_items raw_links={raw_links}",
+        )
+    return CheckResult(
+        "naver:news",
+        "degraded",
+        f"{ticker} provider_returned_no_items raw_links=0",
+    )
+
+
 def _print_result(result: CheckResult) -> None:
     print(f"[{result.status.upper()}] {result.name}: {result.detail}")
 
@@ -341,6 +413,7 @@ async def _run_checks(as_of: date, ticker: str) -> list[CheckResult]:
     results = [_check_wsl(), _check_resolver()]
     results.extend(_check_dns(host) for host in HOSTS)
     results.extend(await _check_market_stack(as_of, ticker))
+    results.append(await _check_news(as_of, ticker))
     results.append(await _check_dart(as_of, ticker))
     results.append(await _check_ecos(as_of))
     return results

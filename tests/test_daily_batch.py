@@ -5,6 +5,7 @@ import json
 import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 
 def _load_module(path: Path, module_name: str):
@@ -108,3 +109,61 @@ def test_assess_crawl_outputs_reports_missing_categories(tmp_path: Path) -> None
     assert "market/ohlcv" not in missing
     assert "market/cap" in missing
     assert "index/ohlcv" in missing
+
+
+def test_build_kr_snapshot_summary_tracks_news_population(tmp_path: Path) -> None:
+    module = _load_module(
+        Path("scripts/build_kr_snapshot.py"),
+        "build_kr_snapshot_summary_test",
+    )
+    snapshot = SimpleNamespace(
+        decision_date=date(2026, 2, 27),
+        execution_date=date(2026, 3, 2),
+        universe=["005930", "000660"],
+        prices={"005930": [object()], "000660": []},
+        fundamentals={
+            "005930": SimpleNamespace(quarters=[object()], market_cap=1.0, last_close_price=1.0),
+            "000660": SimpleNamespace(quarters=[], market_cap=None, last_close_price=None),
+        },
+        filings={
+            "005930": SimpleNamespace(business_overview="overview", risks="", mda="", governance=""),
+            "000660": SimpleNamespace(business_overview="", risks="", mda="", governance=""),
+        },
+        news={
+            "005930": [SimpleNamespace(headline="headline") for _ in range(2)],
+            "000660": [],
+        },
+        sector_map={"005930": "Tech", "000660": "Tech"},
+        sector_averages={"Tech": object()},
+        benchmark_prices=[object(), object()],
+    )
+
+    summary = module._summary_payload(
+        snapshot,
+        "2026-02",
+        "official",
+        tmp_path,
+    )
+
+    assert summary["news_tickers"] == 2
+    assert summary["news_populated_tickers"] == 1
+    assert summary["news_items"] == 2
+
+
+def test_build_kr_snapshot_manifest_warns_when_news_coverage_is_zero() -> None:
+    module = _load_module(
+        Path("scripts/build_kr_snapshot.py"),
+        "build_kr_snapshot_warnings_test",
+    )
+
+    warnings = module._manifest_warnings(
+        "official",
+        {
+            "market_cap": 1,
+            "benchmark_bars": 1,
+            "news_populated_tickers": 0,
+            "news_items": 0,
+        },
+    )
+
+    assert "news coverage is zero" in warnings

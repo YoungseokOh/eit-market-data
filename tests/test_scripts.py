@@ -7,6 +7,7 @@ from datetime import date
 from pathlib import Path
 
 import pandas as pd
+from eit_market_data.schemas.snapshot import NewsItem
 
 
 def _load_module(path: Path, module_name: str):
@@ -110,3 +111,62 @@ def test_preflight_dart_marks_missing_market_fields_as_degraded(monkeypatch) -> 
     assert result.status == "degraded"
     assert "market_cap" in result.detail
     assert "last_close_price" in result.detail
+
+
+def test_preflight_news_ok_when_provider_returns_items(monkeypatch) -> None:
+    module = _load_module(
+        Path("scripts/preflight_kr_data.py"),
+        "preflight_kr_data_news_ok_test",
+    )
+
+    class DummyProvider:
+        async def fetch_news(self, ticker, as_of, lookback_days=30):  # noqa: ANN001
+            _ = (ticker, as_of, lookback_days)
+            return [NewsItem(date=date(2026, 3, 12), source="Naver", headline="headline")]
+
+    monkeypatch.setattr(module, "NaverNewsProvider", lambda: DummyProvider())
+
+    result = asyncio.run(module._check_news(date(2026, 3, 12), "005930"))
+
+    assert result.status == "ok"
+    assert "items=1" in result.detail
+
+
+def test_preflight_news_fails_when_provider_empty_but_raw_links_exist(monkeypatch) -> None:
+    module = _load_module(
+        Path("scripts/preflight_kr_data.py"),
+        "preflight_kr_data_news_failed_test",
+    )
+
+    class DummyProvider:
+        async def fetch_news(self, ticker, as_of, lookback_days=30):  # noqa: ANN001
+            _ = (ticker, as_of, lookback_days)
+            return []
+
+    monkeypatch.setattr(module, "NaverNewsProvider", lambda: DummyProvider())
+    monkeypatch.setattr(module, "_probe_naver_news_links", lambda ticker: 5)
+
+    result = asyncio.run(module._check_news(date(2026, 3, 12), "005930"))
+
+    assert result.status == "failed"
+    assert "raw_links=5" in result.detail
+
+
+def test_preflight_news_degrades_when_raw_page_is_empty(monkeypatch) -> None:
+    module = _load_module(
+        Path("scripts/preflight_kr_data.py"),
+        "preflight_kr_data_news_degraded_test",
+    )
+
+    class DummyProvider:
+        async def fetch_news(self, ticker, as_of, lookback_days=30):  # noqa: ANN001
+            _ = (ticker, as_of, lookback_days)
+            return []
+
+    monkeypatch.setattr(module, "NaverNewsProvider", lambda: DummyProvider())
+    monkeypatch.setattr(module, "_probe_naver_news_links", lambda ticker: 0)
+
+    result = asyncio.run(module._check_news(date(2026, 3, 12), "005930"))
+
+    assert result.status == "degraded"
+    assert "raw_links=0" in result.detail

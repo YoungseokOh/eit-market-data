@@ -232,11 +232,12 @@ def _interactive_login_cookie_export(
     logger.info("Opening KRX login page in Chromium profile %s", profile_dir)
 
     with sync_playwright() as playwright:
-        context = playwright.chromium.launch_persistent_context(
-            str(profile_dir),
-            headless=False,
-        )
+        context = None
         try:
+            context = playwright.chromium.launch_persistent_context(
+                str(profile_dir),
+                headless=False,
+            )
             page = context.pages[0] if context.pages else context.new_page()
             page.goto(KRX_LOGIN_URL, wait_until="domcontentloaded")
             deadline = time.monotonic() + timeout_seconds
@@ -250,8 +251,18 @@ def _interactive_login_cookie_export(
                     if status.authenticated:
                         return cookie_path
                 time.sleep(2)
+        except Exception as exc:
+            if exc.__class__.__name__ == "TargetClosedError":
+                raise KrxAuthRequired(
+                    "Chromium window closed before KRX login completed. "
+                    "Keep the browser open until the terminal prints [OK]. "
+                    "On Windows, run scripts/windows_krx_setup_and_probe.cmd "
+                    "from PowerShell or cmd."
+                ) from exc
+            raise
         finally:
-            context.close()
+            if context is not None:
+                context.close()
 
     raise KrxAuthRequired(
         f"KRX login did not complete within {timeout_seconds} seconds"

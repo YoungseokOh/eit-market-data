@@ -13,38 +13,75 @@ from eit_market_data.schemas.snapshot import NewsItem
 
 logger = logging.getLogger(__name__)
 
+_NAVER_MAIN_NEWS_URL = "https://finance.naver.com/item/main.nhn?code={ticker}"
+_DATE_PATTERN = re.compile(r"(\d{4})\.(\d{2})\.(\d{2})")
+_MONTH_DAY_PATTERN = re.compile(r"(\d{2})/(\d{2})")
 
-def _parse_naver_date(date_str: str) -> date | None:
-    """Parse date strings from Naver Finance (YYYY.MM.DD or relative dates)."""
+
+def _parse_naver_date(date_str: str, as_of: date) -> date | None:
+    """Parse date strings from Naver Finance relative to the requested as_of."""
     if not date_str:
         return None
 
     date_str = date_str.strip()
 
     # Try YYYY.MM.DD format
-    match = re.match(r"(\d{4})\.(\d{2})\.(\d{2})", date_str)
+    match = _DATE_PATTERN.match(date_str)
     if match:
         try:
             return date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
         except ValueError:
             return None
 
+    # Naver main page uses MM/DD for recent headlines.
+    match = _MONTH_DAY_PATTERN.match(date_str)
+    if match:
+        month = int(match.group(1))
+        day = int(match.group(2))
+        try:
+            parsed = date(as_of.year, month, day)
+        except ValueError:
+            return None
+        if parsed > as_of:
+            try:
+                return date(as_of.year - 1, month, day)
+            except ValueError:
+                return None
+        return parsed
+
     # Try "N분전", "N시간전", "N일전" formats
     if "분전" in date_str:
         match = re.search(r"(\d+)분전", date_str)
         if match:
-            return date.today()
+            return as_of
     elif "시간전" in date_str:
         match = re.search(r"(\d+)시간전", date_str)
         if match:
-            return date.today()
+            return as_of
     elif "일전" in date_str:
         match = re.search(r"(\d+)일전", date_str)
         if match:
             days = int(match.group(1))
-            return date.today() - timedelta(days=days)
+            return as_of - timedelta(days=days)
 
     return None
+
+
+def _apply_response_encoding(response: Any) -> None:
+    content_type = str(response.headers.get("content-type", "")).lower()
+    if "charset=" in content_type:
+        charset = content_type.split("charset=", 1)[1].split(";", 1)[0].strip()
+        if charset:
+            response.encoding = charset
+            return
+
+    apparent = getattr(response, "apparent_encoding", "")
+    if apparent:
+        response.encoding = apparent
+        return
+
+    if not getattr(response, "encoding", ""):
+        response.encoding = "euc-kr"
 
 
 class NaverNewsProvider:
@@ -70,7 +107,7 @@ class NaverNewsProvider:
     def _fetch_news_sync(
         self, ticker: str, as_of: date, lookback_days: int
     ) -> list[NewsItem]:
-        """Synchronously fetch news from Naver Finance."""
+        """Synchronously fetch news from the Naver Finance main-page news block."""
         try:
             import requests
             from bs4 import BeautifulSoup
@@ -80,86 +117,59 @@ class NaverNewsProvider:
 
         cutoff_date = as_of - timedelta(days=lookback_days)
         news_items: list[NewsItem] = []
+        seen_links: set[str] = set()
 
         try:
-            url = f"https://finance.naver.com/item/news_news.nhn?code={ticker}&page=1"
+            url = _NAVER_MAIN_NEWS_URL.format(ticker=ticker)
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
             }
             response = requests.get(url, headers=headers, timeout=10)
-            response.encoding = "utf-8"
+            response.raise_for_status()
+            _apply_response_encoding(response)
             soup = BeautifulSoup(response.text, "html.parser")
 
-            # Find news items in the table
-            # Naver Finance typically uses <table> with <tr> rows for news
-            table = soup.find("table", {"class": "type5"})
-            if table is None:
-                # Try alternative class
-                table = soup.find("table")
-
-            if table is None:
-                logger.debug("No news table found for %s", ticker)
+            container = soup.select_one("div.sub_section.news_section")
+            if container is None:
+                logger.debug("No news section found for %s", ticker)
                 return []
 
-            rows = table.find_all("tr")
-            for row in rows:
-                # Skip header rows
-                if row.find("th"):
+            for row in container.find_all("li"):
+                headline_elem = row.select_one('span.txt > a[href*="/item/news_read.naver"]')
+                if headline_elem is None:
                     continue
 
-                cells = row.find_all("td")
-                if len(cells) < 2:
+                href = str(headline_elem.get("href", "")).strip()
+                if not href or href in seen_links:
+                    continue
+                seen_links.add(href)
+
+                headline = headline_elem.get_text(" ", strip=True)
+                if not headline:
                     continue
 
-                # Extract headline from first cell
-                headline_elem = cells[0].find("a")
-                if not headline_elem:
-                    continue
-                headline = headline_elem.get_text(strip=True)
-
-                # Extract date - usually in second or third column
-                date_text = None
-                for cell in cells[1:]:
-                    text = cell.get_text(strip=True)
-                    if re.match(r"\d{4}\.\d{2}\.\d{2}", text) or any(
-                        suffix in text for suffix in ["분전", "시간전", "일전"]
-                    ):
-                        date_text = text
-                        break
-
+                date_elem = row.find("em")
+                date_text = date_elem.get_text(" ", strip=True) if date_elem else ""
                 if not date_text:
                     continue
 
-                news_date = _parse_naver_date(date_text)
+                news_date = _parse_naver_date(date_text, as_of)
                 if news_date is None:
                     continue
 
-                # Filter by as_of (no future articles)
                 if news_date > as_of:
                     continue
-
-                # Filter by lookback window
                 if news_date < cutoff_date:
                     continue
 
-                # Try to extract source
-                source = "Naver"
-                for cell in cells:
-                    source_elem = cell.find("span", {"class": "press"})
-                    if source_elem:
-                        source = source_elem.get_text(strip=True)
-                        break
-
-                if headline and news_date:
-                    news_items.append(
-                        NewsItem(
-                            headline=headline,
-                            date=news_date,
-                            source=source,
-                        )
+                news_items.append(
+                    NewsItem(
+                        headline=headline,
+                        date=news_date,
+                        source="Naver",
                     )
+                )
 
-                # Limit to 15 items max
                 if len(news_items) >= 15:
                     break
 

@@ -29,6 +29,21 @@ python scripts/krx_login.py
 ~/.cache/eit-market-data/krx-profile/cookies.json
 ```
 
+Windows에서 이 repo를 직접 열어 한 번에 준비, 로그인, FDR probe까지 실행하려면:
+
+```powershell
+scripts\windows_krx_setup_and_probe.cmd
+```
+
+PowerShell에서 직접 실행할 수도 있습니다:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows_krx_setup_and_probe.ps1
+```
+
+이 스크립트는 `.venv` 생성, `.[kr]` 설치, Playwright Chromium 설치, `krx_login.py`,
+`probe_fdr_krx_session.py` 실행까지 순서대로 처리합니다.
+
 그 다음 preflight를 실행합니다:
 
 ```bash
