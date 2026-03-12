@@ -1,10 +1,12 @@
 # Commit Messages
 
-- Use conventional commit messages in this format:
-  - `<type>: <title>`
+- Use commit messages in this exact format:
+  - `<type>: <message>`
   - blank line
   - `<body>`
-- The body is required and should explain what changed and why.
+- The body is required.
+- The body should explain what changed and why.
+- Do not use a scope in the subject line.
 - Prefer concise commit types such as `feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `ci`, `build`, and `perf`.
 
 ## Repository Examples
@@ -20,4 +22,3 @@ fix: handle missing market cap in kr fundamentals
 
 fall back to price-derived close data when official market snapshot fields are unavailable
 ```
-

@@ -24,3 +24,7 @@ Use this skill for official KRX session problems, not for general CI-safe bundle
 - Known symptoms and recovery steps: `references/runbook.md`
 - CI-safe alternative path: `../kr-bundle-pipeline/SKILL.md`
 
+## Commit Format
+
+If you make a commit while using this skill, follow `@rules/commit-messages.md`:
+`<type>: <message>` then a blank line then `<body>`.

@@ -25,3 +25,7 @@ Use this skill for the KR snapshot export path that feeds `eit-research`.
 - Contract and commands: `references/contract.md`
 - Batch artifact expectations: `references/batch.md`
 
+## Commit Format
+
+If you make a commit while using this skill, follow `@rules/commit-messages.md`:
+`<type>: <message>` then a blank line then `<body>`.

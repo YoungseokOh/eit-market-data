@@ -16,8 +16,9 @@ This repository keeps Claude-specific project instructions under `.claude/`.
 - Keep `.claude/` as the canonical location for Claude project instructions.
 - Put modular instructions under `.claude/rules/` instead of ad-hoc top-level markdown files.
 - Follow `.claude/rules/commit-messages.md` for commit formatting in this repository.
+- Commit subject format is `<type>: <message>`.
+- Commit body is required and must be separated from the subject by one blank line.
 
 ## Imported Rules
 
 - commit messages @rules/commit-messages.md
-

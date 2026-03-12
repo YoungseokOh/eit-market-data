@@ -28,3 +28,7 @@ Every value in a snapshot must be knowable on or before `decision_date`.
 - Checklist and hotspots: `references/pit-checklist.md`
 - Cross-repo bundle contract: `../kr-bundle-pipeline/references/contract.md`
 
+## Commit Format
+
+If you make a commit while using this skill, follow `@rules/commit-messages.md`:
+`<type>: <message>` then a blank line then `<body>`.

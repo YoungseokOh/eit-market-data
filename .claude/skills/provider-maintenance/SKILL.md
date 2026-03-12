@@ -26,3 +26,7 @@ Use this skill for provider evolution work in `eit-market-data`.
 - For bundle-facing changes: `../kr-bundle-pipeline/SKILL.md`
 - For timing safety: `../point-in-time-guardrails/SKILL.md`
 
+## Commit Format
+
+If you make a commit while using this skill, follow `@rules/commit-messages.md`:
+`<type>: <message>` then a blank line then `<body>`.

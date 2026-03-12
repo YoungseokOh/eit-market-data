@@ -6,13 +6,15 @@ Agent instructions for working in this repository.
 
 ## Section 1: Commit Rules
 
-규칙 전문: `.claude/commit-rules.md`
+규칙 전문: `.claude/rules/commit-messages.md`
 
 ### 한줄 요약
 
 ```
-<type>(<scope>): <subject>
+<type>: <message>
 ```
+
+커밋 본문은 필수이며, 제목 다음에 빈 줄 하나를 두고 작성한다.
 
 ### 금지사항
 

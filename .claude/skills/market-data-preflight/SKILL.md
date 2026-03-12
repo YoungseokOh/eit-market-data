@@ -32,3 +32,7 @@ Use this skill to gate any operational run of the KR data pipeline.
 - For KRX login/session failures: `../krx-auth-recovery/SKILL.md`
 - For snapshot timing safety: `../point-in-time-guardrails/SKILL.md`
 
+## Commit Format
+
+If you make a commit while using this skill, follow `@rules/commit-messages.md`:
+`<type>: <message>` then a blank line then `<body>`.
