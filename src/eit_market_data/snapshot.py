@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -19,6 +20,7 @@ from eit_market_data.synthetic import SyntheticProvider
 from eit_market_data.schemas.snapshot import MonthlySnapshot, SnapshotMetadata
 
 MONTHLY_SNAPSHOT_FILENAME = "snapshot.json"
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -66,7 +68,9 @@ def create_kr_providers(
     from eit_market_data.kr.fundamental_provider import CompositeKrFundamentalProvider
     from eit_market_data.kr.ci_safe_provider import (
         FdrNaverPriceProvider,
+        NullDartProvider,
         NullBenchmarkProvider,
+        NullMacroProvider,
         SeedSectorProvider,
     )
     from eit_market_data.kr.naver_news_provider import NaverNewsProvider
@@ -74,7 +78,17 @@ def create_kr_providers(
     from eit_market_data.kr.dart_provider import DartProvider
     from eit_market_data.kr.pykrx_provider import PykrxProvider
 
-    dart = DartProvider()
+    try:
+        dart = DartProvider()
+    except (ImportError, ValueError) as exc:
+        logger.warning("Falling back to NullDartProvider: %s", exc)
+        dart = NullDartProvider()
+    try:
+        macro = EcosMacroProvider()
+    except (ImportError, ValueError) as exc:
+        logger.warning("Falling back to NullMacroProvider: %s", exc)
+        macro = NullMacroProvider()
+
     if profile == "ci_safe":
         price_provider = FdrNaverPriceProvider()
         fundamentals = CompositeKrFundamentalProvider(
@@ -91,19 +105,20 @@ def create_kr_providers(
             "fundamental_provider": fundamentals,
             "filing_provider": dart,
             "news_provider": NaverNewsProvider(),
-            "macro_provider": EcosMacroProvider(),
+            "macro_provider": macro,
             "sector_provider": sector_provider,
             "benchmark_provider": NullBenchmarkProvider(),
         }
 
-    fundamentals = CompositeKrFundamentalProvider(dart_provider=dart)
-    pykrx = PykrxProvider(fundamental_provider=fundamentals, official_only=True)
+    pykrx = PykrxProvider(official_only=True)
+    fundamentals = CompositeKrFundamentalProvider(dart_provider=dart, price_provider=pykrx)
+    pykrx._fundamental_provider = fundamentals
     return {
         "price_provider": pykrx,
         "fundamental_provider": fundamentals,
         "filing_provider": dart,
         "news_provider": pykrx,
-        "macro_provider": EcosMacroProvider(),
+        "macro_provider": macro,
         "sector_provider": pykrx,
         "benchmark_provider": pykrx,
     }

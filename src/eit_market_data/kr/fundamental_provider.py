@@ -1,6 +1,6 @@
 """Composite Korean fundamental provider.
 
-Combines DART quarterly statements with pykrx market snapshots so the
+Combines DART quarterly statements with public market snapshots so the
 result matches the fields expected by ``eit-research``.
 """
 
@@ -13,6 +13,8 @@ from typing import Any
 
 from eit_market_data.kr.market_helpers import (
     date_to_yyyymmdd,
+    fetch_market_cap_frame,
+    fetch_stock_ohlcv_frame,
     latest_krx_trading_day,
     normalize_ticker,
 )
@@ -22,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 class CompositeKrFundamentalProvider:
-    """Merge DART fundamentals with KRX point-in-time market fields."""
+    """Merge DART fundamentals with recent market snapshot fields."""
 
     def __init__(
         self,
@@ -35,15 +37,6 @@ class CompositeKrFundamentalProvider:
             from eit_market_data.kr.dart_provider import DartProvider
 
             dart_provider = DartProvider()
-
-        if use_market_snapshot:
-            try:
-                from pykrx import stock  # noqa: F401
-            except ImportError as e:
-                raise ImportError(
-                    "pykrx is required for Korean market data. "
-                    "Install with: pip install -e '.[kr]'"
-                ) from e
 
         self._dart = dart_provider
         self._price_provider = price_provider
@@ -104,8 +97,6 @@ class CompositeKrFundamentalProvider:
         return {"last_close_price": bars[-1].close}
 
     def _fetch_market_snapshot_sync(self, ticker: str, as_of: date) -> dict[str, float | None]:
-        from pykrx import stock
-
         trade_date = latest_krx_trading_day(ticker, as_of)
         if trade_date is None:
             return {
@@ -115,15 +106,15 @@ class CompositeKrFundamentalProvider:
             }
 
         start = trade_date - timedelta(days=1)
-        price_df = stock.get_market_ohlcv_by_date(
-            date_to_yyyymmdd(start),
-            date_to_yyyymmdd(trade_date),
+        price_df, _source = fetch_stock_ohlcv_frame(
             ticker,
+            start,
+            trade_date,
         )
         last_close: float | None = None
         if price_df is not None and not price_df.empty:
             row = price_df.iloc[-1]
-            close_val = row.get("종가", 0) or 0
+            close_val = row.get("종가", row.get("Close", 0)) or 0
             last_close = float(close_val) if close_val else None
 
         market_cap = None
@@ -143,14 +134,12 @@ class CompositeKrFundamentalProvider:
         }
 
     def _market_cap_frame(self, trade_date: date):  # noqa: ANN202
-        from pykrx import stock
-
         cache_key = date_to_yyyymmdd(trade_date)
         if cache_key not in self._market_cap_cache:
             frames: list[Any] = []
             for market in ("KOSPI", "KOSDAQ"):
                 try:
-                    frame = stock.get_market_cap(cache_key, market=market)
+                    frame = fetch_market_cap_frame(trade_date, market)
                 except Exception:
                     frame = None
                 if frame is None or frame.empty:

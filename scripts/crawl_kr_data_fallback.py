@@ -1,20 +1,22 @@
 from __future__ import annotations
 
+import argparse
 import concurrent.futures
 import json
 import re
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 import FinanceDataReader as fdr
 import pandas as pd
 import requests
-from pykrx import stock
 
-START = "20240101"
-END = "20241231"
-PROJECT_ROOT = Path("/home/seok436/projects/eit-market-data")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_ROOT = PROJECT_ROOT / "data"
+DEFAULT_UNIVERSE_CSV = PROJECT_ROOT / "universes/kr_universe.csv"
+DEFAULT_START = "2024-01-01"
+DEFAULT_END = date.today().isoformat()
 
 FG_BASE = "https://cdn.fnguide.com/SVO2/json/chart"
 FG_TIMEOUT = 10
@@ -67,8 +69,12 @@ def _fnguide_get(path: str) -> dict | None:
     return None
 
 
-def _month_end_business_days() -> list[pd.Timestamp]:
-    idx = fdr.DataReader("YAHOO:^KS11", "2024-01-01", "2024-12-31")
+def _parse_iso_date(raw: str) -> pd.Timestamp:
+    return pd.Timestamp(raw).normalize()
+
+
+def _month_end_business_days(start: pd.Timestamp, end: pd.Timestamp) -> list[pd.Timestamp]:
+    idx = fdr.DataReader("YAHOO:^KS11", start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
     idx = idx.sort_index()
     return idx.groupby(idx.index.to_period("M")).tail(1).index.to_list()
 
@@ -77,63 +83,103 @@ def _month_end_business_days() -> list[pd.Timestamp]:
 class TickerMeta:
     ticker: str
     market: str
+    name: str = ""
 
 
-def _load_tickers() -> list[TickerMeta]:
-    kospi = stock.get_market_ticker_list(END, market="KOSPI")
-    kosdaq = stock.get_market_ticker_list(END, market="KOSDAQ")
-    out = [TickerMeta(t, "KOSPI") for t in kospi] + [TickerMeta(t, "KOSDAQ") for t in kosdaq]
-    out.sort(key=lambda x: x.ticker)
-    return out
+def _load_tickers(universe_csv: Path | None = None) -> list[TickerMeta]:
+    if universe_csv is not None and universe_csv.exists():
+        frame = pd.read_csv(universe_csv, dtype={"ticker": str})
+        tickers = [
+            TickerMeta(
+                ticker=str(row.get("ticker", "")).strip().zfill(6),
+                market=str(row.get("market", "")).strip().upper(),
+                name=str(row.get("name", "")).strip(),
+            )
+            for _, row in frame.iterrows()
+            if str(row.get("ticker", "")).strip()
+        ]
+        return [meta for meta in tickers if meta.market in {"KOSPI", "KOSDAQ"}]
+
+    frames = []
+    for market in ("KOSPI", "KOSDAQ"):
+        frame = fdr.StockListing(market)
+        if frame is None or frame.empty:
+            continue
+        frame = frame.rename(columns={"Code": "ticker", "Name": "name", "Market": "market"})
+        frame["ticker"] = frame["ticker"].astype(str).str.zfill(6)
+        frames.append(frame[["ticker", "market", "name"]])
+
+    if not frames:
+        return []
+
+    merged = pd.concat(frames, ignore_index=True).drop_duplicates(subset=["ticker"])
+    return [
+        TickerMeta(
+            ticker=str(row["ticker"]).strip(),
+            market=str(row["market"]).strip().upper(),
+            name=str(row["name"]).strip(),
+        )
+        for _, row in merged.sort_values(["market", "ticker"]).iterrows()
+    ]
 
 
-def _extract_monthly_cap(meta: TickerMeta, month_ends: list[pd.Timestamp]) -> list[dict]:
+def _extract_daily_cap(
+    meta: TickerMeta,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    month_end_map: dict[pd.Period, pd.Timestamp],
+) -> list[dict]:
     obj = _fnguide_get(f"01_01/chart_A{meta.ticker}_3Y.json")
     if not obj:
         return []
+
     chart = obj.get("CHART", [])
     if not isinstance(chart, list) or not chart:
         return []
 
     frame = pd.DataFrame(chart)
-    if "TRD_DT" not in frame.columns or "MKT_CAP" not in frame.columns:
+    if "TRD_DT" not in frame.columns or "MKT_CAP" not in frame.columns or "J_PRC" not in frame.columns:
         return []
 
     frame["TRD_DT"] = pd.to_datetime(frame["TRD_DT"], errors="coerce")
     frame = frame.dropna(subset=["TRD_DT"]).sort_values("TRD_DT")
+    frame["TRD_DT"] = frame["TRD_DT"].dt.normalize()
     frame["MKT_CAP"] = frame["MKT_CAP"].map(_to_num)
-    if "J_PRC" in frame.columns:
-        frame["J_PRC"] = frame["J_PRC"].map(_to_num)
+    frame["J_PRC"] = frame["J_PRC"].map(_to_num)
+    frame = frame[(frame["TRD_DT"] >= start) & (frame["TRD_DT"] <= end)]
 
     rows: list[dict] = []
-    for month_end in month_ends:
-        sub = frame[frame["TRD_DT"] <= month_end]
-        if sub.empty:
-            continue
-        row = sub.iloc[-1]
-        cap_eok = row.get("MKT_CAP")
-        if cap_eok is None:
+    for _, row in frame.iterrows():
+        trade_date = pd.Timestamp(row["TRD_DT"]).normalize()
+        target_trade_date = month_end_map.get(trade_date.to_period("M"))
+        if target_trade_date is None:
             continue
         close = row.get("J_PRC")
+        cap_eok = row.get("MKT_CAP")
+        if close is None or close <= 0 or cap_eok is None or cap_eok <= 0:
+            continue
+        market_cap = int(round(cap_eok * 100_000_000))
+        issued_shares = int(round(market_cap / close))
         rows.append(
             {
-                "ticker": meta.ticker,
-                "market": meta.market,
-                "target_month_end": month_end.normalize(),
-                "source_trade_date": pd.Timestamp(row["TRD_DT"]).normalize(),
-                "종가": None if close is None else int(round(close)),
-                "시가총액": int(round(cap_eok * 100_000_000)),
+                "종목코드": meta.ticker,
+                "종목명": meta.name,
+                "시장": meta.market,
+                "종가": int(round(close)),
+                "시가총액": market_cap,
+                "상장주식수": issued_shares,
+                "source_trade_date": target_trade_date,
             }
         )
     return rows
 
 
 def _extract_x_multiplier(name: str) -> float | None:
-    m = re.search(r"([0-9]+(?:\\.[0-9]+)?)X", str(name))
-    if not m:
+    match = re.search(r"([0-9]+(?:\\.[0-9]+)?)X", str(name))
+    if not match:
         return None
     try:
-        return float(m.group(1))
+        return float(match.group(1))
     except ValueError:
         return None
 
@@ -189,72 +235,103 @@ def _extract_monthly_fundamental(meta: TickerMeta, month_ends: list[pd.Timestamp
         if eps in {None, 0} or bps in {None, 0}:
             continue
 
-        per = price / eps
-        pbr = price / bps
-
         rows.append(
             {
                 "ticker": meta.ticker,
                 "market": meta.market,
                 "target_month_end": month_end.normalize(),
                 "source_month": pd.Timestamp(row["GS_YM"]).normalize(),
-                "PER": float(per),
-                "PBR": float(pbr),
+                "PER": float(price / eps),
+                "PBR": float(price / bps),
                 "EPS": float(eps),
             }
         )
     return rows
 
 
+def _save_market_daily(rows: list[dict], out_dir: Path) -> None:
+    if not rows:
+        return
+    frame = pd.DataFrame(rows)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    grouped = frame.groupby(
+        [frame["시장"], pd.to_datetime(frame["source_trade_date"]).dt.strftime("%Y%m%d")],
+        sort=True,
+    )
+    for (market, trade_date), group in grouped:
+        path = out_dir / f"{market}_{trade_date}.parquet"
+        ordered = group.sort_values("종목코드").reset_index(drop=True)
+        ordered.to_parquet(path, index=False)
+        print(f"[SAVE] cap-daily {path} rows={len(ordered)}")
+
+
 def _save_market_monthly(rows: list[dict], out_dir: Path, prefix: str) -> None:
     if not rows:
         return
-    df = pd.DataFrame(rows)
+    frame = pd.DataFrame(rows)
     out_dir.mkdir(parents=True, exist_ok=True)
-    for (market, month), g in df.groupby(
-        [df["market"], pd.to_datetime(df["target_month_end"]).dt.strftime("%Y%m")],
+    grouped = frame.groupby(
+        [frame["market"], pd.to_datetime(frame["target_month_end"]).dt.strftime("%Y%m")],
         sort=True,
-    ):
+    )
+    for (market, month), group in grouped:
         path = out_dir / f"{market}_{month}.parquet"
-        g = g.sort_values("ticker").reset_index(drop=True)
-        g.to_parquet(path, index=False)
-        print(f"[SAVE] {prefix} {path} rows={len(g)}")
+        ordered = group.sort_values("ticker").reset_index(drop=True)
+        ordered.to_parquet(path, index=False)
+        print(f"[SAVE] {prefix} {path} rows={len(ordered)}")
 
 
-def collect_cap_and_fundamental(tickers: list[TickerMeta], month_ends: list[pd.Timestamp]) -> None:
-    cap_rows: list[dict] = []
-    fund_rows: list[dict] = []
-
+def collect_cap_daily(
+    tickers: list[TickerMeta],
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    month_ends: list[pd.Timestamp],
+    out_root: Path,
+) -> None:
+    month_end_map = {month_end.to_period("M"): month_end.normalize() for month_end in month_ends}
+    rows: list[dict] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=FG_MAX_WORKERS) as executor:
-        cap_futs = {executor.submit(_extract_monthly_cap, t, month_ends): t.ticker for t in tickers}
-        for i, fut in enumerate(concurrent.futures.as_completed(cap_futs), start=1):
-            cap_rows.extend(fut.result())
-            if i % 250 == 0:
-                print(f"[CAP] processed {i}/{len(cap_futs)} tickers")
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=FG_MAX_WORKERS) as executor:
-        fund_futs = {
-            executor.submit(_extract_monthly_fundamental, t, month_ends): t.ticker for t in tickers
+        futures = {
+            executor.submit(_extract_daily_cap, meta, start, end, month_end_map): meta.ticker
+            for meta in tickers
         }
-        for i, fut in enumerate(concurrent.futures.as_completed(fund_futs), start=1):
-            fund_rows.extend(fut.result())
+        for i, future in enumerate(concurrent.futures.as_completed(futures), start=1):
+            rows.extend(future.result())
             if i % 250 == 0:
-                print(f"[FUND] processed {i}/{len(fund_futs)} tickers")
+                print(f"[CAP-DAILY] processed {i}/{len(futures)} tickers")
 
-    _save_market_monthly(cap_rows, OUTPUT_ROOT / "market/cap", "cap")
-    _save_market_monthly(fund_rows, OUTPUT_ROOT / "market/fundamental", "fund")
+    _save_market_daily(rows, out_root / "market/cap_daily")
 
 
-def collect_index_ohlcv() -> None:
-    out_dir = OUTPUT_ROOT / "index/ohlcv"
+def collect_monthly_fundamental(
+    tickers: list[TickerMeta],
+    month_ends: list[pd.Timestamp],
+    out_root: Path,
+) -> None:
+    rows: list[dict] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=FG_MAX_WORKERS) as executor:
+        futures = {
+            executor.submit(_extract_monthly_fundamental, meta, month_ends): meta.ticker
+            for meta in tickers
+        }
+        for i, future in enumerate(concurrent.futures.as_completed(futures), start=1):
+            rows.extend(future.result())
+            if i % 250 == 0:
+                print(f"[FUND] processed {i}/{len(futures)} tickers")
+
+    _save_market_monthly(rows, out_root / "market/fundamental", "fund")
+
+
+def collect_index_ohlcv(start: pd.Timestamp, end: pd.Timestamp, out_root: Path) -> None:
+    out_dir = out_root / "index/ohlcv"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     for name, symbol in INDEX_SYMBOLS.items():
-        df = fdr.DataReader(symbol, "2024-01-01", "2024-12-31")
-        if df.empty:
+        frame = fdr.DataReader(symbol, start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
+        if frame.empty:
             print(f"[SKIP] index empty: {name}")
             continue
-        out = df.rename(
+        out = frame.rename(
             columns={
                 "Open": "시가",
                 "High": "고가",
@@ -265,37 +342,44 @@ def collect_index_ohlcv() -> None:
             }
         )
         out.index.name = "날짜"
-        path = out_dir / f"{name}_2024.parquet"
+        suffix = end.strftime("%Y") if start.year == end.year else f"{start:%Y%m%d}_{end:%Y%m%d}"
+        path = out_dir / f"{name}_{suffix}.parquet"
         out.to_parquet(path, index=True)
         print(f"[SAVE] index {path} rows={len(out)}")
 
 
-def collect_sector() -> None:
-    out_dir = OUTPUT_ROOT / "market/sector"
+def collect_sector(as_of: pd.Timestamp, out_root: Path) -> None:
+    out_dir = out_root / "market/sector"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    as_of = pd.Timestamp("2024-12-31")
     for market in ("KOSPI-DESC", "KOSDAQ-DESC"):
-        df = fdr.StockListing(market)
-        if df.empty:
+        frame = fdr.StockListing(market)
+        if frame.empty:
             print(f"[SKIP] sector empty: {market}")
             continue
-        df = df.rename(columns={"Code": "종목코드", "Name": "종목명", "Sector": "업종명", "Market": "시장"})
-        df["as_of_date"] = as_of
-        out = df[["종목코드", "종목명", "시장", "업종명", "Industry", "ListingDate", "as_of_date"]].copy()
+        frame = frame.rename(
+            columns={
+                "Code": "종목코드",
+                "Name": "종목명",
+                "Industry": "업종명",
+                "Market": "시장",
+            }
+        )
+        frame["as_of_date"] = as_of.normalize()
+        out = frame[["종목코드", "종목명", "시장", "업종명", "Sector", "ListingDate", "as_of_date"]].copy()
         out = out.sort_values("종목코드").reset_index(drop=True)
         market_name = market.replace("-DESC", "")
-        path = out_dir / f"{market_name}_20241231.parquet"
+        path = out_dir / f"{market_name}_{as_of:%Y%m%d}.parquet"
         out.to_parquet(path, index=False)
         print(f"[SAVE] sector {path} rows={len(out)}")
 
 
-def summarize_outputs() -> None:
+def summarize_outputs(out_root: Path) -> None:
     targets = {
-        "cap": OUTPUT_ROOT / "market/cap",
-        "fundamental": OUTPUT_ROOT / "market/fundamental",
-        "index": OUTPUT_ROOT / "index/ohlcv",
-        "sector": OUTPUT_ROOT / "market/sector",
+        "cap_daily": out_root / "market/cap_daily",
+        "fundamental": out_root / "market/fundamental",
+        "index": out_root / "index/ohlcv",
+        "sector": out_root / "market/sector",
     }
     print("\n[SUMMARY]")
     for key, path in targets.items():
@@ -309,16 +393,57 @@ def summarize_outputs() -> None:
 
 
 def main() -> None:
-    month_ends = _month_end_business_days()
+    parser = argparse.ArgumentParser(
+        description="Backfill KR market-cap snapshots and related fallback datasets."
+    )
+    parser.add_argument("--start", default=DEFAULT_START, help="Start date (YYYY-MM-DD).")
+    parser.add_argument("--end", default=DEFAULT_END, help="End date (YYYY-MM-DD).")
+    parser.add_argument(
+        "--universe-csv",
+        default=str(DEFAULT_UNIVERSE_CSV),
+        help="Universe CSV path. If missing, falls back to public KOSPI/KOSDAQ listings.",
+    )
+    parser.add_argument(
+        "--output-root",
+        default=str(OUTPUT_ROOT),
+        help="Base output directory.",
+    )
+    parser.add_argument(
+        "--skip-fundamental",
+        action="store_true",
+        help="Skip monthly PER/PBR/EPS fallback extraction.",
+    )
+    parser.add_argument(
+        "--skip-index",
+        action="store_true",
+        help="Skip index OHLCV fallback extraction.",
+    )
+    parser.add_argument(
+        "--skip-sector",
+        action="store_true",
+        help="Skip sector snapshot extraction.",
+    )
+    args = parser.parse_args()
+
+    start = _parse_iso_date(args.start)
+    end = _parse_iso_date(args.end)
+    out_root = Path(args.output_root)
+    universe_csv = Path(args.universe_csv) if args.universe_csv else None
+
+    month_ends = _month_end_business_days(start, end)
     print("[INFO] month-end business days:", [d.strftime("%Y-%m-%d") for d in month_ends])
 
-    tickers = _load_tickers()
-    print(f"[INFO] tickers loaded: {len(tickers)} (KOSPI+KOSDAQ)")
+    tickers = _load_tickers(universe_csv)
+    print(f"[INFO] tickers loaded: {len(tickers)}")
 
-    collect_cap_and_fundamental(tickers, month_ends)
-    collect_index_ohlcv()
-    collect_sector()
-    summarize_outputs()
+    collect_cap_daily(tickers, start, end, month_ends, out_root)
+    if not args.skip_fundamental:
+        collect_monthly_fundamental(tickers, month_ends, out_root)
+    if not args.skip_index:
+        collect_index_ohlcv(start, end, out_root)
+    if not args.skip_sector:
+        collect_sector(end, out_root)
+    summarize_outputs(out_root)
 
 
 if __name__ == "__main__":

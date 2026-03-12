@@ -11,18 +11,49 @@ from eit_market_data.snapshot import create_kr_providers
 from eit_market_data.schemas.snapshot import FundamentalData, QuarterlyFinancials
 
 
-def test_create_kr_providers_ci_safe_uses_seed_sector(tmp_path: Path) -> None:
+def test_create_kr_providers_ci_safe_uses_seed_sector(tmp_path: Path, monkeypatch) -> None:
     universe_csv = tmp_path / "kr_universe.csv"
     universe_csv.write_text(
         "ticker,market,sector,name\n005930,KOSPI,Technology,삼성전자\n",
         encoding="utf-8",
     )
 
+    class DummyDartProvider:
+        pass
+
+    class DummyMacroProvider:
+        pass
+
+    monkeypatch.setattr("eit_market_data.kr.dart_provider.DartProvider", DummyDartProvider)
+    monkeypatch.setattr("eit_market_data.kr.ecos_provider.EcosMacroProvider", DummyMacroProvider)
     providers = create_kr_providers(profile="ci_safe", universe_csv=universe_csv)
 
     assert type(providers["price_provider"]).__name__ == "FdrNaverPriceProvider"
     assert type(providers["sector_provider"]).__name__ == "SeedSectorProvider"
     assert type(providers["benchmark_provider"]).__name__ == "NullBenchmarkProvider"
+
+
+def test_create_kr_providers_official_falls_back_without_dart_and_ecos(monkeypatch) -> None:
+    class DummyPykrxProvider:
+        def __init__(self, official_only=True) -> None:
+            self.official_only = official_only
+            self._fundamental_provider = None
+
+    monkeypatch.setattr(
+        "eit_market_data.kr.dart_provider.DartProvider",
+        lambda: (_ for _ in ()).throw(ValueError("missing dart key")),
+    )
+    monkeypatch.setattr(
+        "eit_market_data.kr.ecos_provider.EcosMacroProvider",
+        lambda: (_ for _ in ()).throw(ValueError("missing ecos key")),
+    )
+    monkeypatch.setattr("eit_market_data.kr.pykrx_provider.PykrxProvider", DummyPykrxProvider)
+
+    providers = create_kr_providers(profile="official")
+
+    assert type(providers["filing_provider"]).__name__ == "NullDartProvider"
+    assert type(providers["macro_provider"]).__name__ == "NullMacroProvider"
+    assert type(providers["price_provider"]).__name__ == "DummyPykrxProvider"
 
 
 def test_seed_sector_provider_uses_universe_csv(tmp_path: Path) -> None:

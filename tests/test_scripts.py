@@ -170,3 +170,107 @@ def test_preflight_news_degrades_when_raw_page_is_empty(monkeypatch) -> None:
 
     assert result.status == "degraded"
     assert "raw_links=0" in result.detail
+
+
+def test_crawl_kr_data_fallback_extracts_daily_cap(monkeypatch) -> None:
+    module = _load_module(
+        Path("scripts/crawl_kr_data_fallback.py"),
+        "crawl_kr_data_fallback_extract_test",
+    )
+    monkeypatch.setattr(
+        module,
+        "_fnguide_get",
+        lambda path: {
+            "CHART": [
+                {"TRD_DT": "2024-01-31", "J_PRC": "70,000", "MKT_CAP": "4200000"},
+                {"TRD_DT": "2024-02-01", "J_PRC": "0", "MKT_CAP": "4210000"},
+            ]
+        },
+    )
+    meta = module.TickerMeta(ticker="005930", market="KOSPI", name="삼성전자")
+
+    rows = module._extract_daily_cap(
+        meta,
+        pd.Timestamp("2024-01-01"),
+        pd.Timestamp("2024-01-31"),
+        {pd.Period("2024-01", freq="M"): pd.Timestamp("2024-01-31")},
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["종목코드"] == "005930"
+    assert rows[0]["종가"] == 70000
+    assert rows[0]["시가총액"] == 4200000 * 100_000_000
+    assert rows[0]["상장주식수"] == round((4200000 * 100_000_000) / 70000)
+
+
+def test_crawl_kr_data_fallback_maps_month_label_to_month_end(monkeypatch) -> None:
+    module = _load_module(
+        Path("scripts/crawl_kr_data_fallback.py"),
+        "crawl_kr_data_fallback_month_end_test",
+    )
+    monkeypatch.setattr(
+        module,
+        "_fnguide_get",
+        lambda path: {
+            "CHART": [
+                {"TRD_DT": "2024/02/01", "J_PRC": "71,000", "MKT_CAP": "4210000"},
+            ]
+        },
+    )
+    meta = module.TickerMeta(ticker="005930", market="KOSPI", name="삼성전자")
+
+    rows = module._extract_daily_cap(
+        meta,
+        pd.Timestamp("2024-02-01"),
+        pd.Timestamp("2024-02-29"),
+        {pd.Period("2024-02", freq="M"): pd.Timestamp("2024-02-29")},
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["source_trade_date"] == pd.Timestamp("2024-02-29")
+
+
+def test_crawl_kr_data_fallback_saves_daily_cap_grouped_files(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = _load_module(
+        Path("scripts/crawl_kr_data_fallback.py"),
+        "crawl_kr_data_fallback_save_test",
+    )
+    rows = [
+        {
+            "종목코드": "005930",
+            "종목명": "삼성전자",
+            "시장": "KOSPI",
+            "종가": 70000,
+            "시가총액": 420000000000000,
+            "상장주식수": 5960000000,
+            "source_trade_date": pd.Timestamp("2024-01-31"),
+        },
+        {
+            "종목코드": "000660",
+            "종목명": "SK하이닉스",
+            "시장": "KOSPI",
+            "종가": 120000,
+            "시가총액": 87360000000000,
+            "상장주식수": 728000000,
+            "source_trade_date": pd.Timestamp("2024-01-31"),
+        },
+    ]
+
+    saved: dict[Path, pd.DataFrame] = {}
+
+    def _fake_to_parquet(self, path, index=False):  # noqa: ANN001
+        _ = index
+        saved[Path(path)] = self.copy()
+
+    monkeypatch.setattr(module.pd.DataFrame, "to_parquet", _fake_to_parquet)
+
+    module._save_market_daily(rows, tmp_path)
+
+    output = tmp_path / "KOSPI_20240131.parquet"
+    assert output in saved
+    frame = saved[output]
+    assert frame["종목코드"].tolist() == ["000660", "005930"]
+    assert set(frame.columns) >= {"종목코드", "시가총액", "상장주식수", "source_trade_date"}

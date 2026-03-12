@@ -1,4 +1,4 @@
-"""pykrx-based Korean market data providers."""
+"""Korean market data providers."""
 
 from __future__ import annotations
 
@@ -9,12 +9,15 @@ from typing import Any, Callable
 
 from eit_market_data.kr.market_helpers import (
     date_to_yyyymmdd,
+    fetch_stock_ohlcv_frame,
     fetch_index_ohlcv_frame,
     fetch_live_sector_classification_map,
     load_sector_snapshot_map,
     normalize_ticker,
+    fetch_market_cap_frame,
+    fetch_market_ticker_list,
 )
-from eit_market_data.kr.krx_auth import KrxAuthRequired, install_pykrx_krx_session_hooks
+from eit_market_data.kr.krx_auth import KrxAuthRequired
 from eit_market_data.schemas.snapshot import (
     FundamentalData,
     NewsItem,
@@ -33,13 +36,13 @@ def _normalize_ticker(ticker: str) -> str:
 
 
 class PykrxProvider:
-    """Korean market data provider based on pykrx.
+    """Korean market data provider backed by public FinanceDataReader routes.
 
     Implements:
     - PriceProvider
     - SectorProvider
     - BenchmarkProvider
-    - NewsProvider (stub: pykrx has no news API)
+    - NewsProvider (delegates to Naver Finance)
     """
 
     def __init__(
@@ -47,14 +50,6 @@ class PykrxProvider:
         fundamental_provider: Any | None = None,
         official_only: bool = True,
     ) -> None:
-        try:
-            from pykrx import stock  # noqa: F401
-        except ImportError as e:
-            raise ImportError(
-                "pykrx is required for Korean market data. "
-                "Install with: pip install -e '.[kr]'"
-            ) from e
-        install_pykrx_krx_session_hooks()
         self._fundamental_provider = fundamental_provider
         self._fundamental_provider_init_failed = False
         self._official_only = official_only
@@ -70,7 +65,7 @@ class PykrxProvider:
     async def _run_limited(
         self, fn: Callable[..., Any], *args: Any, **kwargs: Any
     ) -> Any:
-        """Run a sync pykrx call in thread with concurrency/rate limits."""
+        """Run a sync market-data call in thread with concurrency/rate limits."""
         async with self._semaphore:
             try:
                 return await asyncio.to_thread(fn, *args, **kwargs)
@@ -84,29 +79,34 @@ class PykrxProvider:
     async def fetch_prices(
         self, ticker: str, as_of: date, lookback_days: int = 300
     ) -> list[PriceBar]:
-        """Fetch KRX OHLCV prices for a stock ticker."""
+        """Fetch Korean stock OHLCV prices for a ticker."""
         norm_ticker = _normalize_ticker(ticker)
         try:
             return await self._run_limited(
                 self._fetch_prices_sync, norm_ticker, as_of, lookback_days
             )
         except Exception as e:
-            logger.warning("pykrx price fetch failed for %s: %s", norm_ticker, e)
+            logger.warning("KR price fetch failed for %s: %s", norm_ticker, e)
             return []
 
     def _fetch_prices_sync(
         self, ticker: str, as_of: date, lookback_days: int
     ) -> list[PriceBar]:
-        from pykrx import stock
-
         start = as_of - timedelta(days=max(int(lookback_days * 1.8), 30))
-        df = stock.get_market_ohlcv_by_date(
-            date_to_yyyymmdd(start),
-            date_to_yyyymmdd(as_of),
+        df, _source = fetch_stock_ohlcv_frame(
             ticker,
+            start,
+            as_of,
+            logger_=logger,
         )
         if df is None or df.empty:
             return []
+
+        open_col = "시가" if "시가" in df.columns else "Open"
+        high_col = "고가" if "고가" in df.columns else "High"
+        low_col = "저가" if "저가" in df.columns else "Low"
+        close_col = "종가" if "종가" in df.columns else "Close"
+        volume_col = "거래량" if "거래량" in df.columns else "Volume"
 
         bars: list[PriceBar] = []
         for idx, row in df.iterrows():
@@ -116,11 +116,11 @@ class PykrxProvider:
             bars.append(
                 PriceBar(
                     date=bar_date,
-                    open=round(float(row.get("시가", 0) or 0), 2),
-                    high=round(float(row.get("고가", 0) or 0), 2),
-                    low=round(float(row.get("저가", 0) or 0), 2),
-                    close=round(float(row.get("종가", 0) or 0), 2),
-                    volume=float(row.get("거래량", 0) or 0),
+                    open=round(float(row.get(open_col, 0) or 0), 2),
+                    high=round(float(row.get(high_col, 0) or 0), 2),
+                    low=round(float(row.get(low_col, 0) or 0), 2),
+                    close=round(float(row.get(close_col, 0) or 0), 2),
+                    volume=float(row.get(volume_col, 0) or 0),
                 )
             )
 
@@ -133,7 +133,7 @@ class PykrxProvider:
     async def fetch_sector_map(
         self, universe: list[str], as_of: date | None = None
     ) -> dict[str, str]:
-        """Fetch sector names for Korean universe from pykrx."""
+        """Fetch sector names for the Korean universe."""
         result: dict[str, str] = {}
         tickers = [_normalize_ticker(t) for t in universe]
         effective_as_of = as_of or date.today()
@@ -283,7 +283,7 @@ class PykrxProvider:
                 raise
             return []
         except Exception as e:
-            logger.warning("pykrx benchmark fetch failed: %s", e)
+            logger.warning("KR benchmark fetch failed: %s", e)
             return []
 
     def _fetch_benchmark_sync(self, as_of: date, lookback_days: int) -> list[PriceBar]:
@@ -339,21 +339,16 @@ def get_kr_universe(
 ) -> list[str]:
     """Return top_n Korean tickers by market cap as of the given date.
 
-    Uses pykrx to dynamically fetch KOSPI + KOSDAQ tickers.
+    Uses FinanceDataReader public listings to dynamically fetch KOSPI + KOSDAQ tickers.
     Returns 6-digit stock codes sorted by market cap descending.
     """
-    from pykrx import stock
-
-    install_pykrx_krx_session_hooks()
-
     if markets is None:
         markets = ["KOSPI", "KOSDAQ"]
 
-    date_str = as_of.strftime("%Y%m%d")
     all_tickers: list[str] = []
     for market in markets:
         try:
-            tickers = stock.get_market_ticker_list(date_str, market=market)
+            tickers = fetch_market_ticker_list(as_of, market)
             all_tickers.extend(tickers)
         except Exception:
             pass
@@ -361,11 +356,11 @@ def get_kr_universe(
     caps: dict[str, int] = {}
     for market in markets:
         try:
-            df_cap = stock.get_market_cap(date_str, market=market)
+            df_cap = fetch_market_cap_frame(as_of, market)
             for ticker, row in df_cap.iterrows():
                 cap = row.get("시가총액", 0)
                 if cap and cap > 0:
-                    caps[str(ticker)] = int(cap)
+                    caps[normalize_ticker(str(ticker))] = int(cap)
         except Exception:
             pass
 

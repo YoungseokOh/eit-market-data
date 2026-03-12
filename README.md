@@ -16,11 +16,27 @@ pip install -e '.[all,dev]'
 
 ## KR Preflight
 
-KRX 공식 지수/시장 데이터는 2026년 KRX Data Marketplace 로그인 정책 변경 이후
-브라우저 로그인 세션이 필요합니다. 먼저 로컬에서 한 번 로그인 세션을 생성하세요:
+기본 KR 경로는 FinanceDataReader 0.9.110의 공개 API를 사용하므로
+브라우저 로그인이나 KRX 쿠키가 필요하지 않습니다.
+
+preflight를 실행합니다:
+
+```bash
+python scripts/preflight_kr_data.py --as-of 2026-03-06 --ticker 005930
+```
+
+This checks:
+- WSL2 detection and `/etc/resolv.conf`
+- DNS resolution for KRX/Naver/ECOS
+- public FDR KR price, listing, market-cap, benchmark, and sector lookup
+- DART fundamentals
+- ECOS macro coverage
+
+KRX 로그인 관련 스크립트는 기본 런타임이 아니라 수동 진단/실험용으로만 남아 있습니다:
 
 ```bash
 python scripts/krx_login.py
+python scripts/probe_fdr_krx_session.py
 ```
 
 기본 쿠키 저장 위치:
@@ -30,38 +46,15 @@ python scripts/krx_login.py
 ```
 
 세션 쿠키는 인증 정보이므로 저장소에 커밋하면 안 됩니다. WSL2에서는 Windows에서 생성한
-쿠키 파일을 그대로 재사용하세요. 이 repo의 `scripts/auto_shell.sh`는 WSL에서 repo에
-들어올 때 `/mnt/c/Users/$USER/.cache/eit-market-data/krx-profile/cookies.json` 이 있으면
+쿠키 파일을 그대로 재사용할 수 있고, `scripts/auto_shell.sh`는
+`/mnt/c/Users/$USER/.cache/eit-market-data/krx-profile/cookies.json` 이 있으면
 `EIT_KRX_COOKIE_PATH` 와 `EIT_KRX_PROFILE_DIR` 를 자동으로 맞춥니다.
 
-Windows에서 이 repo를 직접 열어 한 번에 준비, 로그인, FDR probe까지 실행하려면:
+Windows에서 이 repo를 직접 열어 로그인과 probe를 한 번에 실행하려면:
 
 ```powershell
 scripts\windows_krx_setup_and_probe.cmd
 ```
-
-PowerShell에서 직접 실행할 수도 있습니다:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\windows_krx_setup_and_probe.ps1
-```
-
-이 스크립트는 `.venv` 생성, `.[kr]` 설치, Playwright Chromium 설치, `krx_login.py`,
-`probe_fdr_krx_session.py` 실행까지 순서대로 처리합니다.
-
-그 다음 preflight를 실행합니다:
-
-```bash
-python scripts/preflight_kr_data.py --as-of 2026-03-06 --ticker 005930
-```
-
-This checks:
-- WSL2 detection and `/etc/resolv.conf`
-- DNS resolution for KRX/Naver/ECOS
-- KRX authenticated session health for official index/market-wide endpoints
-- `pykrx` price, benchmark, and sector lookup
-- DART fundamentals
-- ECOS macro coverage
 
 ## WSL2 Notes
 

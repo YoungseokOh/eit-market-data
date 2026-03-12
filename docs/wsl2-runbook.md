@@ -63,7 +63,7 @@ python scripts/preflight_kr_data.py --as-of 2026-03-06 --ticker 005930
 Expected outcome:
 
 - DNS checks for `data.krx.co.kr`, `fchart.stock.naver.com`, `ecos.bok.or.kr` are `OK`
-- `pykrx:prices` and `pykrx:benchmark` are `OK`
+- `public:prices`, `public:market-cap`, `public:benchmark`, `public:sector` are `OK`
 - `dart` is `OK`
 - `ecos` is `OK` or explicitly `DEGRADED`
 
@@ -75,6 +75,7 @@ Exit codes:
 
 ## 4. Current caveats
 
-- `pykrx` index ticker metadata is unstable upstream, so index OHLCV falls back to Yahoo data when needed.
-- Live sector classifications may be unavailable upstream. Runtime uses the latest cached sector snapshot on or before `as_of`.
+- Default KR runtime uses FinanceDataReader public routes and does not require KRX login cookies.
+- KRX login scripts remain available only for manual diagnostics and legacy experiments.
+- Public FDR `market_cap` is treated as a recent snapshot; historical month-end backfills still need a separate path if exact point-in-time cap is required.
 - ECOS monthly and quarterly series must be fetched with verified item codes and full-page pagination; this repository now handles that internally.

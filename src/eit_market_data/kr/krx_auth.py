@@ -1,4 +1,4 @@
-"""KRX Data Marketplace authentication helpers for pykrx-backed calls."""
+"""KRX Data Marketplace authentication helpers for KRX-backed calls."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import requests
@@ -37,6 +38,19 @@ _COOKIE_ENV = "EIT_KRX_COOKIE_PATH"
 _session_lock = threading.Lock()
 _configured_session: requests.Session | None = None
 _pykrx_hooks_installed = False
+_fdr_hooks_installed = False
+
+
+class _RequestsProxy:
+    """Proxy only the requests calls used inside FDR KRX modules."""
+
+    def __init__(self, base: ModuleType, *, get_fn, post_fn) -> None:  # noqa: ANN001
+        self._base = base
+        self.get = get_fn
+        self.post = post_fn
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._base, name)
 
 
 class KrxAuthRequired(RuntimeError):
@@ -215,6 +229,56 @@ def install_pykrx_krx_session_hooks() -> None:
         _pykrx_hooks_installed = True
 
 
+def install_fdr_krx_session_hooks() -> None:
+    global _fdr_hooks_installed
+    with _session_lock:
+        if _fdr_hooks_installed:
+            return
+
+        import FinanceDataReader.krx.data as fdr_krx_data
+        import FinanceDataReader.krx.listing as fdr_krx_listing
+        import FinanceDataReader.krx.snap as fdr_krx_snap
+
+        def _shared_get(url: str, **kwargs):  # noqa: ANN001
+            session = get_krx_session()
+            headers = dict(KRX_HEADERS)
+            headers.update(kwargs.pop("headers", {}) or {})
+            response = session.get(
+                url,
+                headers=headers,
+                timeout=kwargs.pop("timeout", DEFAULT_TIMEOUT_SECONDS),
+                **kwargs,
+            )
+            if "data.krx.co.kr" in url.lower():
+                raise_for_auth_failure(response, f"KRX GET {url}")
+            return response
+
+        def _shared_post(url: str, data=None, json=None, **kwargs):  # noqa: ANN001
+            session = get_krx_session()
+            headers = dict(KRX_HEADERS)
+            headers.update(kwargs.pop("headers", {}) or {})
+            response = session.post(
+                url,
+                data=data,
+                json=json,
+                headers=headers,
+                timeout=kwargs.pop("timeout", DEFAULT_TIMEOUT_SECONDS),
+                **kwargs,
+            )
+            if "data.krx.co.kr" in url.lower():
+                raise_for_auth_failure(response, f"KRX POST {url}")
+            return response
+
+        for module in (fdr_krx_data, fdr_krx_listing, fdr_krx_snap):
+            module.requests = _RequestsProxy(  # type: ignore[assignment]
+                module.requests,
+                get_fn=_shared_get,
+                post_fn=_shared_post,
+            )
+
+        _fdr_hooks_installed = True
+
+
 def _interactive_login_cookie_export(
     profile_dir: Path,
     cookie_path: Path,
@@ -278,6 +342,7 @@ def ensure_krx_authenticated_session(
     timeout_seconds: int = DEFAULT_LOGIN_TIMEOUT_SECONDS,
 ) -> requests.Session:
     install_pykrx_krx_session_hooks()
+    install_fdr_krx_session_hooks()
 
     if not force_refresh:
         current = get_krx_session()

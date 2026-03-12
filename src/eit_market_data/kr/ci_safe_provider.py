@@ -12,7 +12,14 @@ from typing import Any
 import numpy as np
 
 from eit_market_data.kr.market_helpers import normalize_ticker
-from eit_market_data.schemas.snapshot import NewsItem, PriceBar, SectorAverages
+from eit_market_data.schemas.snapshot import (
+    FilingData,
+    FundamentalData,
+    MacroData,
+    NewsItem,
+    PriceBar,
+    SectorAverages,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -167,6 +174,31 @@ class NullNewsProvider:
     ) -> list[NewsItem]:
         _ = (ticker, as_of, lookback_days)
         return []
+
+
+class NullDartProvider:
+    """Placeholder DART provider when API key or dependency is unavailable."""
+
+    async def fetch_fundamentals(
+        self,
+        ticker: str,
+        as_of: date,
+        n_quarters: int = 8,
+    ) -> FundamentalData:
+        _ = (as_of, n_quarters)
+        return FundamentalData(ticker=normalize_ticker(ticker))
+
+    async def fetch_filing(self, ticker: str, as_of: date) -> FilingData:
+        _ = as_of
+        return FilingData(ticker=normalize_ticker(ticker))
+
+
+class NullMacroProvider:
+    """Placeholder macro provider when ECOS API key is unavailable."""
+
+    async def fetch_macro(self, as_of: date) -> MacroData:
+        _ = as_of
+        return MacroData()
 
 
 class NullBenchmarkProvider:
