@@ -1,11 +1,14 @@
 from __future__ import annotations
-
-import asyncio
 import sys
 import types
 from datetime import date
+from urllib.parse import parse_qs, urlparse
 
-from eit_market_data.kr.naver_news_provider import NaverNewsProvider, _parse_naver_date
+from eit_market_data.kr.naver_news_provider import (
+    NaverArchiveNewsProvider,
+    NaverNewsProvider,
+    _parse_naver_date,
+)
 
 
 class _DummyResponse:
@@ -38,6 +41,29 @@ def _install_dummy_requests(monkeypatch, *, text: str = "", raises: bool = False
 
     dummy_module = types.SimpleNamespace(
         get=get,
+        RequestException=DummyRequestException,
+    )
+    monkeypatch.setitem(sys.modules, "requests", dummy_module)
+
+
+def _install_dummy_archive_requests(monkeypatch, pages: dict[int, str], *, expected_referer: str | None = None) -> None:
+    class DummyRequestException(Exception):
+        pass
+
+    class DummySession:
+        def get(self, url, headers=None, timeout=10):  # noqa: ANN001, ANN202
+            _ = (headers, timeout)
+            if expected_referer is not None:
+                assert headers is not None
+                assert headers.get("Referer") == expected_referer
+            page = int(parse_qs(urlparse(url).query).get("page", ["1"])[0])
+            return _DummyResponse(pages.get(page, ""))
+
+        def close(self) -> None:
+            return None
+
+    dummy_module = types.SimpleNamespace(
+        Session=DummySession,
         RequestException=DummyRequestException,
     )
     monkeypatch.setitem(sys.modules, "requests", dummy_module)
@@ -76,7 +102,7 @@ def test_fetch_news_parses_main_page_news_section(monkeypatch) -> None:
         """,
     )
 
-    items = asyncio.run(NaverNewsProvider().fetch_news("005930", date(2026, 3, 12)))
+    items = NaverNewsProvider()._fetch_news_sync("005930", date(2026, 3, 12), 30)
 
     assert [item.headline for item in items] == ["첫 기사", "둘째 기사"]
     assert [item.date for item in items] == [date(2026, 3, 12), date(2026, 3, 11)]
@@ -87,7 +113,7 @@ def test_fetch_news_parses_main_page_news_section(monkeypatch) -> None:
 def test_fetch_news_returns_empty_when_section_missing(monkeypatch) -> None:
     _install_dummy_requests(monkeypatch, text="<html><body><div>no news here</div></body></html>")
 
-    items = asyncio.run(NaverNewsProvider().fetch_news("005930", date(2026, 3, 12)))
+    items = NaverNewsProvider()._fetch_news_sync("005930", date(2026, 3, 12), 30)
 
     assert items == []
 
@@ -95,6 +121,97 @@ def test_fetch_news_returns_empty_when_section_missing(monkeypatch) -> None:
 def test_fetch_news_returns_empty_on_request_failure(monkeypatch) -> None:
     _install_dummy_requests(monkeypatch, raises=True)
 
-    items = asyncio.run(NaverNewsProvider().fetch_news("005930", date(2026, 3, 12)))
+    items = NaverNewsProvider()._fetch_news_sync("005930", date(2026, 3, 12), 30)
 
     assert items == []
+
+
+def test_fetch_archive_records_sync_dedupes_and_keeps_target_month(monkeypatch) -> None:
+    _install_dummy_archive_requests(
+        monkeypatch,
+        pages={
+            1: """
+            <table class="type5">
+              <tr>
+                <td class="title"><a href="/item/news_read.naver?article_id=1&code=005930">첫 기사</a></td>
+                <td class="info">연합</td>
+                <td class="date">2026.03.12</td>
+              </tr>
+              <tr>
+                <td class="title"><a href="/item/news_read.naver?article_id=2&code=005930">둘째 기사</a></td>
+                <td class="info">매체B</td>
+                <td class="date">2026.03.10</td>
+              </tr>
+            </table>
+            """,
+            2: """
+            <table class="type5">
+              <tr>
+                <td class="title"><a href="/item/news_read.naver?article_id=2&code=005930">둘째 기사</a></td>
+                <td class="info">매체B</td>
+                <td class="date">2026.03.10</td>
+              </tr>
+              <tr>
+                <td class="title"><a href="/item/news_read.naver?article_id=3&code=005930">셋째 기사</a></td>
+                <td class="info">매체C</td>
+                <td class="date">2026.03.01</td>
+              </tr>
+              <tr>
+                <td class="title"><a href="/item/news_read.naver?article_id=4&code=005930">이전달 기사</a></td>
+                <td class="info">매체D</td>
+                <td class="date">2026.02.28</td>
+              </tr>
+            </table>
+            """,
+        },
+        expected_referer="https://finance.naver.com/item/news.naver?code=005930",
+    )
+
+    records = NaverArchiveNewsProvider(
+        max_pages=5,
+        page_delay_seconds=0,
+    )._fetch_archive_records_sync(
+        "005930",
+        date(2026, 3, 12),
+        lookback_days=12,
+    )
+
+    assert [record.headline for record in records] == ["첫 기사", "둘째 기사", "셋째 기사"]
+    assert [record.date for record in records] == [
+        date(2026, 3, 12),
+        date(2026, 3, 10),
+        date(2026, 3, 1),
+    ]
+    assert len({record.url for record in records}) == 3
+
+
+def test_fetch_archive_records_sync_raises_when_full_coverage_not_reached(monkeypatch) -> None:
+    _install_dummy_archive_requests(
+        monkeypatch,
+        pages={
+            1: """
+            <table class="type5">
+              <tr>
+                <td class="title"><a href="/item/news_read.naver?article_id=1&code=005930">첫 기사</a></td>
+                <td class="info">연합</td>
+                <td class="date">2026.03.12</td>
+              </tr>
+            </table>
+            """,
+        },
+        expected_referer="https://finance.naver.com/item/news.naver?code=005930",
+    )
+
+    provider = NaverArchiveNewsProvider(
+        max_pages=1,
+        page_delay_seconds=0,
+        require_full_coverage=True,
+        raise_on_error=True,
+    )
+
+    try:
+        provider._fetch_archive_records_sync("005930", date(2026, 3, 12), 12)
+    except RuntimeError as exc:
+        assert "did not reach required start date" in str(exc)
+    else:
+        raise AssertionError("expected strict coverage failure")

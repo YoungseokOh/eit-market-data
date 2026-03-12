@@ -32,6 +32,7 @@ class CompositeKrFundamentalProvider:
         price_provider: Any | None = None,
         *,
         use_market_snapshot: bool = True,
+        raise_on_error: bool = False,
     ) -> None:
         if dart_provider is None:
             from eit_market_data.kr.dart_provider import DartProvider
@@ -41,6 +42,7 @@ class CompositeKrFundamentalProvider:
         self._dart = dart_provider
         self._price_provider = price_provider
         self._use_market_snapshot = use_market_snapshot
+        self._raise_on_error = raise_on_error
         self._market_cap_cache: dict[str, Any] = {}
         self._semaphore = asyncio.Semaphore(2)
 
@@ -69,6 +71,8 @@ class CompositeKrFundamentalProvider:
                     norm_ticker,
                     e,
                 )
+                if self._raise_on_error:
+                    raise
                 return FundamentalData(ticker=norm_ticker)
 
         return self._merge_fundamentals(dart_fundamentals, market_snapshot, price_snapshot)

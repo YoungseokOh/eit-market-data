@@ -42,8 +42,12 @@ def _load_snapshots(snapshots_dir: Path) -> list[dict]:
 
 
 def seed(snapshots_dir: Path) -> None:
-    _DART_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    cache = diskcache.Cache(str(_DART_CACHE_DIR))
+    seed_into_cache(snapshots_dir, _DART_CACHE_DIR)
+
+
+def seed_into_cache(snapshots_dir: Path, cache_dir: Path) -> None:
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache = diskcache.Cache(str(cache_dir))
 
     snapshots = _load_snapshots(snapshots_dir)
     if not snapshots:
@@ -85,7 +89,7 @@ def seed(snapshots_dir: Path) -> None:
 
     cache.close()
     print(f"Seeded {fundamentals_seeded} fundamentals, {filings_seeded} filings from {len(snapshots)} snapshot(s).")
-    print(f"Cache dir: {_DART_CACHE_DIR}")
+    print(f"Cache dir: {cache_dir}")
 
 
 def main() -> None:
@@ -96,8 +100,13 @@ def main() -> None:
         default=PROJECT_ROOT / "artifacts" / "snapshots",
         help="Directory containing YYYY-MM/snapshot.json files",
     )
+    parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        help="Override the DART diskcache directory. Defaults to EIT_DART_CACHE_DIR or repo data/dart_cache.",
+    )
     args = parser.parse_args()
-    seed(args.snapshots_dir)
+    seed_into_cache(args.snapshots_dir, args.cache_dir or _DART_CACHE_DIR)
 
 
 if __name__ == "__main__":

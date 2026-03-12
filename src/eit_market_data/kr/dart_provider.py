@@ -15,7 +15,12 @@ from eit_market_data.schemas.snapshot import FilingData, FundamentalData, Quarte
 logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
-_DART_CACHE_DIR = _PROJECT_ROOT / "data" / "dart_cache"
+_DART_CACHE_DIR = Path(
+    os.environ.get(
+        "EIT_DART_CACHE_DIR",
+        str(_PROJECT_ROOT / "data" / "dart_cache"),
+    )
+).expanduser()
 _FINSTATE_TTL = 120 * 86_400   # quarterly statements are final once filed
 _REPORT_LIST_TTL = 30 * 86_400  # new filings may appear; refresh monthly
 _DOC_TTL = 365 * 86_400        # documents never change after filing
@@ -337,7 +342,13 @@ def _report_entries_from_list(report_list: Any, as_of: date) -> list[dict[str, A
 class DartProvider:
     """Korean fundamentals/filings provider backed by OpenDartReader."""
 
-    def __init__(self, api_key: str | None = None) -> None:
+    def __init__(
+        self,
+        api_key: str | None = None,
+        *,
+        allow_stale_fallback: bool = True,
+        raise_on_error: bool = False,
+    ) -> None:
         try:
             from OpenDartReader import OpenDartReader as _OpenDartReader
         except ImportError:
@@ -360,6 +371,8 @@ class DartProvider:
         self._corp_cache: dict[str, str | None] = {}
         self._corp_list: Any = None
         self._semaphore = asyncio.Semaphore(2)
+        self._allow_stale_fallback = allow_stale_fallback
+        self._raise_on_error = raise_on_error
 
         try:
             import diskcache
@@ -384,6 +397,8 @@ class DartProvider:
                 )
             except Exception as e:
                 logger.warning("DART fundamentals fetch failed for %s: %s", norm_ticker, e)
+                if self._raise_on_error:
+                    raise
                 result = FundamentalData(ticker=norm_ticker)
 
         if result.quarters:
@@ -391,9 +406,16 @@ class DartProvider:
         elif not result.quarters:
             # API returned empty — try any stale entry for this ticker
             stale = self._cache_stale(f"fundamental:{norm_ticker}:")
-            if stale is not None and isinstance(stale, FundamentalData) and stale.quarters:
+            if (
+                self._allow_stale_fallback
+                and stale is not None
+                and isinstance(stale, FundamentalData)
+                and stale.quarters
+            ):
                 logger.warning("DART API returned empty; using stale fundamentals cache for %s", norm_ticker)
                 return stale
+            if self._raise_on_error:
+                raise RuntimeError(f"DART fundamentals returned empty for {norm_ticker}")
         return result
 
     async def fetch_filing(self, ticker: str, as_of: date) -> FilingData:
@@ -408,15 +430,24 @@ class DartProvider:
                 result = await asyncio.to_thread(self._fetch_filing_sync, norm_ticker, as_of)
             except Exception as e:
                 logger.warning("DART filing fetch failed for %s: %s", norm_ticker, e)
+                if self._raise_on_error:
+                    raise
                 result = FilingData(ticker=norm_ticker)
 
         if result.business_overview:
             self._cache_set(cache_key, result, _DOC_TTL)
         elif not result.business_overview:
             stale = self._cache_stale(f"filing:{norm_ticker}:")
-            if stale is not None and isinstance(stale, FilingData) and stale.business_overview:
+            if (
+                self._allow_stale_fallback
+                and stale is not None
+                and isinstance(stale, FilingData)
+                and stale.business_overview
+            ):
                 logger.warning("DART API returned empty; using stale filing cache for %s", norm_ticker)
                 return stale
+            if self._raise_on_error:
+                raise RuntimeError(f"DART filing returned empty for {norm_ticker}")
         return result
 
     # ------------------------------------------------------------------
@@ -521,9 +552,13 @@ class DartProvider:
 
         # All API calls failed — try any stale cache entry for this report
         stale = self._cache_stale(f"finstate:{corp_code}:{year}:{reprt_code}:")
-        if stale is not None:
+        if self._allow_stale_fallback and stale is not None:
             logger.warning("DART API unavailable; using stale finstate cache for %s %s %s", corp_code, year, reprt_code)
             return stale
+        if self._raise_on_error:
+            raise RuntimeError(
+                f"DART finstate unavailable for corp={corp_code} year={year} reprt_code={reprt_code}"
+            )
         return None
 
     def _pick_account_value(self, df: Any, candidates: list[str]) -> float | None:
@@ -584,9 +619,11 @@ class DartProvider:
         except Exception as exc:
             # API unavailable — try most recent stale entry for this corp
             stale = self._cache_stale(f"reports:{corp_code}:")
-            if stale is not None:
+            if self._allow_stale_fallback and stale is not None:
                 logger.warning("DART API unavailable; using stale report list for %s: %s", corp_code, exc)
                 return stale
+            if self._raise_on_error:
+                raise
             raise
 
         if result is not None and not result.empty:

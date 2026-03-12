@@ -36,6 +36,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _display_path(path: Path) -> str:
+    try:
+        return str(path.relative_to(PROJECT_ROOT))
+    except ValueError:
+        return str(path)
+
+
 async def build_us_snapshot(
     as_of: date,
     universe: list[str],
@@ -136,10 +143,10 @@ async def build_us_snapshot(
                 "market_risk": len(snapshot.macro.market_risk),
             },
             "files": {
-                "snapshot": str(snapshot_path.relative_to(PROJECT_ROOT)),
-                "metadata": str(metadata_path.relative_to(PROJECT_ROOT)),
-                "manifest": str(manifest_path.relative_to(PROJECT_ROOT)),
-                "summary": str(summary_path.relative_to(PROJECT_ROOT)),
+                "snapshot": _display_path(snapshot_path),
+                "metadata": _display_path(metadata_path),
+                "manifest": _display_path(manifest_path),
+                "summary": _display_path(summary_path),
             },
         }
         summary_path.write_text(

@@ -7,7 +7,15 @@ from datetime import date
 from pathlib import Path
 
 import pandas as pd
-from eit_market_data.schemas.snapshot import NewsItem
+from eit_market_data.schemas.snapshot import (
+    FilingData,
+    FundamentalData,
+    MacroData,
+    MonthlySnapshot,
+    NewsItem,
+    PriceBar,
+    SnapshotMetadata,
+)
 
 
 def _load_module(path: Path, module_name: str):
@@ -274,3 +282,58 @@ def test_crawl_kr_data_fallback_saves_daily_cap_grouped_files(
     frame = saved[output]
     assert frame["종목코드"].tolist() == ["000660", "005930"]
     assert set(frame.columns) >= {"종목코드", "시가총액", "상장주식수", "source_trade_date"}
+
+
+def test_build_us_snapshot_supports_external_artifacts_root(monkeypatch, tmp_path: Path) -> None:
+    module = _load_module(
+        Path("scripts/build_us_snapshot.py"),
+        "build_us_snapshot_test",
+    )
+
+    class DummyBuilder:
+        def __init__(self, **providers):  # noqa: ANN003
+            self.providers = providers
+
+        async def build(self, month, universe, config):  # noqa: ANN001, ANN202
+            _ = (month, config)
+            ticker = universe[0]
+            return MonthlySnapshot(
+                decision_date=date(2026, 3, 31),
+                execution_date=date(2026, 4, 1),
+                universe=universe,
+                prices={
+                    ticker: [
+                        PriceBar(
+                            date=date(2026, 3, 31),
+                            open=1,
+                            high=1,
+                            low=1,
+                            close=1,
+                            volume=1,
+                        )
+                    ]
+                },
+                fundamentals={ticker: FundamentalData(ticker=ticker)},
+                filings={ticker: FilingData(ticker=ticker, business_overview="overview")},
+                news={ticker: []},
+                macro=MacroData(rates_policy={"base_rate": 2.75}),
+                benchmark_prices=[],
+                input_hash="hash",
+                metadata=SnapshotMetadata(created_at="2026-03-31T00:00:00"),
+            )
+
+    monkeypatch.setattr(module, "create_real_providers", lambda: {})
+    monkeypatch.setattr(module, "SnapshotBuilder", DummyBuilder)
+
+    result = asyncio.run(
+        module.build_us_snapshot(
+            as_of=date(2026, 3, 12),
+            universe=["AAPL"],
+            artifacts_root=tmp_path,
+        )
+    )
+
+    assert result["status"] == "ok"
+    summary = result["summary"]
+    assert str(tmp_path) in summary["files"]["snapshot"]
+    assert (tmp_path / "snapshots" / "2026-03" / "summary.json").exists()
