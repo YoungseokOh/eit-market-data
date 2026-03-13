@@ -22,11 +22,9 @@ from eit_market_data.kr.ecos_provider import EcosMacroProvider
 from eit_market_data.kr.fundamental_provider import CompositeKrFundamentalProvider
 from eit_market_data.kr.market_helpers import fetch_market_cap_frame, normalize_ticker
 from eit_market_data.kr.news_catalog import (
-    KrNewsCatalogStore,
     KrNewsWindowCoverage,
 )
 from eit_market_data.kr.naver_news_provider import (
-    NaverArchiveNewsProvider,
     NaverArchiveNewsRecord,
 )
 from eit_market_data.kr.pykrx_provider import PykrxProvider
@@ -40,7 +38,12 @@ from eit_market_data.schemas.snapshot import (
     SectorAverages,
     SnapshotMetadata,
 )
-from eit_market_data.snapshot import SnapshotConfig, config_hash
+from eit_market_data.snapshot import (
+    SnapshotConfig,
+    config_hash,
+    serialize_snapshot,
+    serialize_snapshot_metadata,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_US_UNIVERSE = "AAPL,MSFT,GOOGL,AMZN,NVDA"
@@ -436,7 +439,7 @@ def compute_sector_averages_from_state(
 
 
 def _serialize_batch(payload: BatchPayload) -> dict[str, Any]:
-    return {
+    serialized = {
         "tickers": payload.tickers,
         "prices": {
             ticker: [item.model_dump(mode="json") for item in items]
@@ -450,19 +453,23 @@ def _serialize_batch(payload: BatchPayload) -> dict[str, Any]:
             ticker: item.model_dump(mode="json")
             for ticker, item in payload.filings.items()
         },
-        "news": {
+    }
+    if payload.news:
+        serialized["news"] = {
             ticker: [item.model_dump(mode="json") for item in items]
             for ticker, items in payload.news.items()
-        },
-        "news_audit": {
+        }
+    if payload.news_audit:
+        serialized["news_audit"] = {
             ticker: [asdict(item) for item in items]
             for ticker, items in payload.news_audit.items()
-        },
-        "news_coverage": {
+        }
+    if payload.news_coverage:
+        serialized["news_coverage"] = {
             ticker: asdict(item)
             for ticker, item in payload.news_coverage.items()
-        },
-    }
+        }
+    return serialized
 
 
 def _load_batch_payload(path: Path) -> BatchPayload:
@@ -678,13 +685,6 @@ class LocalKrCollector:
             raise_on_error=True,
         )
         self.pykrx._fundamental_provider = self.fundamentals
-        self.news_catalog = KrNewsCatalogStore(storage_root)
-        self.news_provider = NaverArchiveNewsProvider(
-            max_pages=200,
-            page_delay_seconds=0.1,
-            require_full_coverage=False,
-            raise_on_error=True,
-        )
         try:
             self.macro_provider: Any = EcosMacroProvider()
         except Exception:
@@ -718,6 +718,10 @@ class LocalKrCollector:
             batch_files = sorted(self.partial_root.glob("batch_*.json"))
             for batch_file in batch_files:
                 state.merge(_load_batch_payload(batch_file))
+            # Older partial batches may still contain news payloads.
+            state.news.clear()
+            state.news_audit.clear()
+            state.news_coverage.clear()
             next_index = int(progress.get("next_index", 0) or 0)
 
         sector_map = await self.pykrx.fetch_sector_map(tickers, as_of=self.as_of)
@@ -842,18 +846,9 @@ class LocalKrCollector:
         prices = await self.pykrx.fetch_prices(ticker, self.as_of, lookback_days=300)
         fundamentals = await self.fundamentals.fetch_fundamentals(ticker, self.as_of, n_quarters=8)
         filing = await self.dart.fetch_filing(ticker, self.as_of)
-        news_window = await self.news_catalog.capture_and_build_window(
-            provider=self.news_provider,
-            ticker=ticker,
-            as_of=self.as_of,
-            lookback_days=NEWS_LOOKBACK_DAYS,
-        )
         payload.prices[ticker] = prices
         payload.fundamentals[ticker] = fundamentals
         payload.filings[ticker] = filing
-        payload.news[ticker] = news_window.items
-        payload.news_audit[ticker] = news_window.audit
-        payload.news_coverage[ticker] = news_window.coverage
         if self.inter_ticker_delay_seconds > 0:
             await asyncio.sleep(self.inter_ticker_delay_seconds)
         return payload
@@ -882,7 +877,7 @@ class LocalKrCollector:
             filing_hash=_hash_blob(
                 {ticker: bool(item.business_overview) for ticker, item in state.filings.items()}
             ),
-            news_hash=_hash_blob({ticker: len(items) for ticker, items in state.news.items()}),
+            news_hash="",
             macro_hash=_hash_blob(macro.model_dump(mode="json")),
         )
 
@@ -893,7 +888,6 @@ class LocalKrCollector:
             prices=state.prices,
             fundamentals=state.fundamentals,
             filings=state.filings,
-            news=state.news,
             macro=macro,
             sector_map=sector_map,
             sector_averages=sector_averages,
@@ -909,35 +903,14 @@ class LocalKrCollector:
         metadata_path = month_dir / "metadata.json"
         manifest_path = month_dir / "manifest.json"
         summary_path = month_dir / "summary.json"
-        coverage_path = month_dir / "news_coverage.json"
         gzip_path = month_dir / "snapshot.json.gz"
 
-        snapshot_text = snapshot.model_dump_json(indent=2)
+        snapshot_text = json.dumps(serialize_snapshot(snapshot), indent=2, sort_keys=True)
         snapshot_path.write_text(snapshot_text, encoding="utf-8")
         gzip_path.write_bytes(gzip.compress(snapshot_text.encode("utf-8")))
-        metadata_path.write_text(snapshot.metadata.model_dump_json(indent=2), encoding="utf-8")
-        _write_json(
-            coverage_path,
-            {
-                ticker: {
-                    "ticker": coverage.ticker,
-                    "window_start": coverage.window_start.isoformat(),
-                    "window_end": coverage.window_end.isoformat(),
-                    "raw_count": coverage.raw_count,
-                    "captured_days": coverage.captured_days,
-                    "missing_capture_days": coverage.missing_capture_days,
-                    "page_cap_hit_days": coverage.page_cap_hit_days,
-                    "status": coverage.status,
-                }
-                for ticker, coverage in state.news_coverage.items()
-            },
-        )
-
-        degraded_news_tickers = [
-            ticker for ticker, coverage in state.news_coverage.items() if coverage.status != "ok"
-        ]
-        missing_capture_days = sum(
-            len(coverage.missing_capture_days) for coverage in state.news_coverage.values()
+        metadata_path.write_text(
+            json.dumps(serialize_snapshot_metadata(snapshot.metadata), indent=2, sort_keys=True),
+            encoding="utf-8",
         )
 
         manifest = {
@@ -949,14 +922,13 @@ class LocalKrCollector:
                 "snapshot": "snapshot.json",
                 "snapshot_gzip": "snapshot.json.gz",
                 "metadata": "metadata.json",
-                "news_coverage": "news_coverage.json",
                 "summary": "summary.json",
             },
         }
         _write_json(manifest_path, manifest)
 
         summary = {
-            "status": "degraded" if degraded_news_tickers else "ok",
+            "status": "ok",
             "market": "kr",
             "month": self.month,
             "decision_date": snapshot.decision_date.isoformat(),
@@ -965,13 +937,8 @@ class LocalKrCollector:
             "price_tickers": len(snapshot.prices),
             "fundamental_tickers": len(snapshot.fundamentals),
             "filing_tickers": len(snapshot.filings),
-            "news_tickers": len(snapshot.news),
-            "news_items": sum(len(items) for items in snapshot.news.values()),
-            "news_degraded_tickers": len(degraded_news_tickers),
-            "news_missing_capture_days": missing_capture_days,
             "benchmark_bars": len(snapshot.benchmark_prices),
             "snapshot_path": str(snapshot_path),
-            "news_coverage_path": str(coverage_path),
             "summary_path": str(summary_path),
         }
         _write_json(summary_path, summary)

@@ -113,9 +113,6 @@ def _summary_payload(
         "price_tickers": len(snapshot.prices),
         "fundamental_tickers": len(snapshot.fundamentals),
         "filing_tickers": len(snapshot.filings),
-        "news_tickers": len(snapshot.news),
-        "news_populated_tickers": coverage["news_populated_tickers"],
-        "news_items": coverage["news_items"],
         "sector_count": len(snapshot.sector_averages),
         "benchmark_bars": len(snapshot.benchmark_prices),
         "source_profile": profile,
@@ -128,8 +125,6 @@ def _summary_payload(
 def _field_coverage(snapshot) -> dict[str, Any]:  # noqa: ANN001, ANN401
     universe_size = len(snapshot.universe)
     fundamentals = list(snapshot.fundamentals.values())
-    news_populated_tickers = sum(1 for items in snapshot.news.values() if items)
-    news_items = sum(len(items) for items in snapshot.news.values())
     return {
         "universe_size": universe_size,
         "prices": sum(1 for bars in snapshot.prices.values() if bars),
@@ -139,8 +134,6 @@ def _field_coverage(snapshot) -> dict[str, Any]:  # noqa: ANN001, ANN401
             for item in snapshot.filings.values()
             if item.business_overview or item.risks or item.mda or item.governance
         ),
-        "news_populated_tickers": news_populated_tickers,
-        "news_items": news_items,
         "last_close_price": sum(1 for item in fundamentals if item.last_close_price is not None),
         "market_cap": sum(1 for item in fundamentals if item.market_cap is not None),
         "sector_map": len(snapshot.sector_map),
@@ -162,8 +155,6 @@ def _manifest_warnings(profile: str, coverage: dict[str, Any]) -> list[str]:
         warnings.append("market_cap coverage is zero")
     if coverage.get("benchmark_bars", 0) == 0:
         warnings.append("benchmark coverage is zero")
-    if coverage.get("news_populated_tickers", 0) == 0:
-        warnings.append("news coverage is zero")
     return warnings
 
 

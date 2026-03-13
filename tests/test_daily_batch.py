@@ -145,6 +145,8 @@ def test_run_daily_batch_uses_fallback_crawler(monkeypatch, tmp_path: Path) -> N
 
     assert exit_code == 0
     assert summary["status"] == "ok"
+    preflight_command = next(command for command in seen_commands if any("preflight_kr_data.py" in part for part in command))
+    assert "--skip-news" in preflight_command
     crawl_command = next(
         command
         for command in seen_commands
@@ -154,7 +156,7 @@ def test_run_daily_batch_uses_fallback_crawler(monkeypatch, tmp_path: Path) -> N
     assert "--end" in crawl_command
 
 
-def test_build_kr_snapshot_summary_tracks_news_population(tmp_path: Path) -> None:
+def test_build_kr_snapshot_summary_excludes_news_fields(tmp_path: Path) -> None:
     module = _load_module(
         Path("scripts/build_kr_snapshot.py"),
         "build_kr_snapshot_summary_test",
@@ -172,10 +174,6 @@ def test_build_kr_snapshot_summary_tracks_news_population(tmp_path: Path) -> Non
             "005930": SimpleNamespace(business_overview="overview", risks="", mda="", governance=""),
             "000660": SimpleNamespace(business_overview="", risks="", mda="", governance=""),
         },
-        news={
-            "005930": [SimpleNamespace(headline="headline") for _ in range(2)],
-            "000660": [],
-        },
         sector_map={"005930": "Tech", "000660": "Tech"},
         sector_averages={"Tech": object()},
         benchmark_prices=[object(), object()],
@@ -188,12 +186,11 @@ def test_build_kr_snapshot_summary_tracks_news_population(tmp_path: Path) -> Non
         tmp_path,
     )
 
-    assert summary["news_tickers"] == 2
-    assert summary["news_populated_tickers"] == 1
-    assert summary["news_items"] == 2
+    assert "news_tickers" not in summary
+    assert "news_items" not in summary
 
 
-def test_build_kr_snapshot_manifest_warns_when_news_coverage_is_zero() -> None:
+def test_build_kr_snapshot_manifest_ignores_news_coverage() -> None:
     module = _load_module(
         Path("scripts/build_kr_snapshot.py"),
         "build_kr_snapshot_warnings_test",
@@ -204,9 +201,7 @@ def test_build_kr_snapshot_manifest_warns_when_news_coverage_is_zero() -> None:
         {
             "market_cap": 1,
             "benchmark_bars": 1,
-            "news_populated_tickers": 0,
-            "news_items": 0,
         },
     )
 
-    assert "news coverage is zero" in warnings
+    assert warnings == []

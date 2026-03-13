@@ -138,13 +138,11 @@
 
 ## 5. 뉴스 데이터
 
-| 항목 | 값 | 근거 |
-|------|-----|------|
-| 수집 기간 | **최근 30일** | `providers.py:60`, `news.py:28` |
-| 최대 건수 | 15건 | `yfinance_provider.py:361` |
-| 사용 필드 | `date, source, headline, summary` | `news_agent.py:41` |
+현재 MVP 기본 계약에서는 뉴스 데이터를 요구하지 않습니다.
 
-**현재 한국 pykrx는 뉴스 API 미제공 → `fetch_news()` 빈 배열 반환**
+- 새 KR bundle은 `news` 필드를 생략할 수 있습니다.
+- `eit-research`는 old bundle의 `news`는 읽지만, 기본 DAG에서는 사용하지 않습니다.
+- 뉴스 수집 코드는 legacy/diagnostic 경로로만 유지됩니다.
 
 ---
 

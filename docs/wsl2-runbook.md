@@ -57,7 +57,7 @@ Do not commit `cookies.json` into the repository. It is a live authenticated ses
 Run the repo preflight:
 
 ```bash
-python scripts/preflight_kr_data.py --as-of 2026-03-06 --ticker 005930
+python scripts/preflight_kr_data.py --as-of 2026-03-06 --ticker 005930 --skip-news
 ```
 
 Expected outcome:
@@ -66,6 +66,7 @@ Expected outcome:
 - `public:prices`, `public:market-cap`, `public:benchmark`, `public:sector` are `OK`
 - `dart` is `OK`
 - `ecos` is `OK` or explicitly `DEGRADED`
+- 뉴스 진단은 기본 bundle 경로와 분리되어 있으므로 `--skip-news`가 기본이다
 
 Exit codes:
 

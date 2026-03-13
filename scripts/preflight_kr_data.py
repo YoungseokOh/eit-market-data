@@ -323,11 +323,12 @@ def _print_result(result: CheckResult) -> None:
     print(f"[{result.status.upper()}] {result.name}: {result.detail}")
 
 
-async def _run_checks(as_of: date, ticker: str) -> list[CheckResult]:
+async def _run_checks(as_of: date, ticker: str, *, skip_news: bool = False) -> list[CheckResult]:
     results = [_check_wsl(), _check_resolver()]
     results.extend(_check_dns(host) for host in HOSTS)
     results.extend(await _check_market_stack(as_of, ticker))
-    results.append(await _check_news(as_of, ticker))
+    if not skip_news:
+        results.append(await _check_news(as_of, ticker))
     results.append(await _check_dart(as_of, ticker))
     results.append(await _check_ecos(as_of))
     return results
@@ -341,10 +342,15 @@ def main() -> None:
         "--as-of", default=date.today().isoformat(), help="Probe date (YYYY-MM-DD)"
     )
     parser.add_argument("--ticker", default="005930", help="KR ticker to probe")
+    parser.add_argument(
+        "--skip-news",
+        action="store_true",
+        help="Skip optional Naver news diagnostics for no-news bundle builds.",
+    )
     args = parser.parse_args()
 
     as_of = date.fromisoformat(args.as_of)
-    results = asyncio.run(_run_checks(as_of, args.ticker))
+    results = asyncio.run(_run_checks(as_of, args.ticker, skip_news=args.skip_news))
     for result in results:
         _print_result(result)
 

@@ -27,7 +27,13 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 from dotenv import load_dotenv
 load_dotenv(PROJECT_ROOT / ".env")
 
-from eit_market_data.snapshot import SnapshotBuilder, SnapshotConfig, create_real_providers
+from eit_market_data.snapshot import (
+    SnapshotBuilder,
+    SnapshotConfig,
+    create_real_providers,
+    serialize_snapshot,
+    serialize_snapshot_metadata,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -85,7 +91,7 @@ async def build_us_snapshot(
 
         # Save snapshot.json
         snapshot_path = month_dir / "snapshot.json"
-        snapshot_json = json.loads(snapshot.model_dump_json())
+        snapshot_json = serialize_snapshot(snapshot)
         snapshot_path.write_text(
             json.dumps(snapshot_json, indent=2, sort_keys=True),
             encoding="utf-8",
@@ -101,7 +107,7 @@ async def build_us_snapshot(
             "execution_date": str(snapshot.execution_date),
             "universe": snapshot.universe,
             "providers": ["YFinanceProvider", "FredMacroProvider", "EdgarFilingProvider"],
-            "snapshot_metadata": snapshot.metadata.model_dump(),
+            "snapshot_metadata": serialize_snapshot_metadata(snapshot.metadata),
         }
         metadata_path.write_text(
             json.dumps(metadata_json, indent=2, sort_keys=True),

@@ -146,6 +146,7 @@ def run_daily_batch(
             as_of.isoformat(),
             "--ticker",
             ticker,
+            "--skip-news",
         ],
         logs_dir,
     )

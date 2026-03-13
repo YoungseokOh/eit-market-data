@@ -49,7 +49,6 @@ def create_real_providers() -> dict:
         "price_provider": yf,
         "fundamental_provider": yf,
         "filing_provider": EdgarFilingProvider(),
-        "news_provider": yf,
         "macro_provider": FredMacroProvider(),
         "sector_provider": yf,
         "benchmark_provider": yf,
@@ -75,7 +74,6 @@ def create_kr_providers(
         NullMacroProvider,
         SeedSectorProvider,
     )
-    from eit_market_data.kr.naver_news_provider import NaverNewsProvider
     from eit_market_data.kr.ecos_provider import EcosMacroProvider
     from eit_market_data.kr.dart_provider import DartProvider
     from eit_market_data.kr.pykrx_provider import PykrxProvider
@@ -106,7 +104,6 @@ def create_kr_providers(
             "price_provider": price_provider,
             "fundamental_provider": fundamentals,
             "filing_provider": dart,
-            "news_provider": NaverNewsProvider(),
             "macro_provider": macro,
             "sector_provider": sector_provider,
             "benchmark_provider": FdrBenchmarkProvider(),
@@ -119,7 +116,6 @@ def create_kr_providers(
         "price_provider": pykrx,
         "fundamental_provider": fundamentals,
         "filing_provider": dart,
-        "news_provider": pykrx,
         "macro_provider": macro,
         "sector_provider": pykrx,
         "benchmark_provider": pykrx,
@@ -160,6 +156,27 @@ def _content_hash(obj: object) -> str:
     return hashlib.sha256(blob).hexdigest()[:16]
 
 
+def serialize_snapshot(snapshot: MonthlySnapshot) -> dict[str, object]:
+    """Serialize a snapshot while omitting empty legacy news fields."""
+    exclude: dict[str, object] = {}
+    if not snapshot.news:
+        exclude["news"] = True
+
+    metadata_exclude: dict[str, bool] = {}
+    if not snapshot.metadata.news_hash:
+        metadata_exclude["news_hash"] = True
+    if metadata_exclude:
+        exclude["metadata"] = metadata_exclude
+
+    return snapshot.model_dump(mode="json", exclude=exclude)
+
+
+def serialize_snapshot_metadata(metadata: SnapshotMetadata) -> dict[str, object]:
+    """Serialize metadata while omitting empty legacy news hashes."""
+    exclude: dict[str, bool] | None = {"news_hash": True} if not metadata.news_hash else None
+    return metadata.model_dump(mode="json", exclude=exclude)
+
+
 class SnapshotBuilder:
     """Builds a MonthlySnapshot from configured providers.
 
@@ -182,7 +199,7 @@ class SnapshotBuilder:
         self.price = price_provider or synth
         self.fundamental = fundamental_provider or synth
         self.filing = filing_provider or synth
-        self.news = news_provider or synth
+        self.news = news_provider
         self.macro = macro_provider or synth
         self.sector = sector_provider or synth
         self.benchmark = benchmark_provider or synth
@@ -213,7 +230,6 @@ class SnapshotBuilder:
         price_tasks = {t: self.price.fetch_prices(t, decision_date) for t in universe}
         fund_tasks = {t: self.fundamental.fetch_fundamentals(t, decision_date) for t in universe}
         filing_tasks = {t: self.filing.fetch_filing(t, decision_date) for t in universe}
-        news_tasks = {t: self.news.fetch_news(t, decision_date) for t in universe}
         macro_task = self.macro.fetch_macro(decision_date)
         sector_map_task = self.sector.fetch_sector_map(universe, as_of=decision_date)
         benchmark_task = self.benchmark.fetch_benchmark(decision_date)
@@ -222,7 +238,6 @@ class SnapshotBuilder:
         all_prices = await asyncio.gather(*price_tasks.values())
         all_funds = await asyncio.gather(*fund_tasks.values())
         all_filings = await asyncio.gather(*filing_tasks.values())
-        all_news = await asyncio.gather(*news_tasks.values())
         macro, sector_map, benchmark_prices = await asyncio.gather(
             macro_task, sector_map_task, benchmark_task
         )
@@ -230,7 +245,11 @@ class SnapshotBuilder:
         prices = dict(zip(price_tasks.keys(), all_prices, strict=True))
         fundamentals = dict(zip(fund_tasks.keys(), all_funds, strict=True))
         filings = dict(zip(filing_tasks.keys(), all_filings, strict=True))
-        news = dict(zip(news_tasks.keys(), all_news, strict=True))
+        news = {}
+        if self.news is not None:
+            news_tasks = {t: self.news.fetch_news(t, decision_date) for t in universe}
+            all_news = await asyncio.gather(*news_tasks.values())
+            news = dict(zip(news_tasks.keys(), all_news, strict=True))
 
         # Build sector averages
         sectors: dict[str, list[str]] = defaultdict(list)
@@ -256,7 +275,7 @@ class SnapshotBuilder:
             price_hash=_content_hash({t: len(p) for t, p in prices.items()}),
             fundamental_hash=_content_hash({t: len(f.quarters) for t, f in fundamentals.items()}),
             filing_hash=_content_hash({t: bool(f.business_overview) for t, f in filings.items()}),
-            news_hash=_content_hash({t: len(n) for t, n in news.items()}),
+            news_hash=_content_hash({t: len(n) for t, n in news.items()}) if news else "",
             macro_hash=_content_hash(macro.model_dump()),
         )
 
@@ -290,9 +309,11 @@ class SnapshotBuilder:
         artifacts_dir.mkdir(parents=True, exist_ok=True)
 
         meta_path = artifacts_dir / "metadata.json"
-        meta_path.write_text(snapshot.metadata.model_dump_json(indent=2))
+        meta_path.write_text(
+            json.dumps(serialize_snapshot_metadata(snapshot.metadata), indent=2, sort_keys=True)
+        )
         snapshot_path = artifacts_dir / MONTHLY_SNAPSHOT_FILENAME
-        snapshot_text = snapshot.model_dump_json(indent=2)
+        snapshot_text = json.dumps(serialize_snapshot(snapshot), indent=2, sort_keys=True)
         snapshot_path.write_text(snapshot_text)
         (artifacts_dir / "snapshot.json.gz").write_bytes(gzip.compress(snapshot_text.encode("utf-8")))
 

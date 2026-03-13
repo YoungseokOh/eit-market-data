@@ -182,7 +182,7 @@ class MonthlySnapshot(BaseModel):
     prices: dict[str, list[PriceBar]]
     fundamentals: dict[str, FundamentalData]
     filings: dict[str, FilingData]
-    news: dict[str, list[NewsItem]]
+    news: dict[str, list[NewsItem]] = Field(default_factory=dict)
     macro: MacroData
     sector_map: dict[str, str] = Field(
         default_factory=dict, description="{ticker: sector_name}"
