@@ -78,6 +78,7 @@ async def build_snapshot(
         "warnings": _manifest_warnings(profile, field_coverage),
         "files": {
             "snapshot": MONTHLY_SNAPSHOT_FILENAME,
+            "snapshot_gzip": "snapshot.json.gz",
             "metadata": "metadata.json",
             "summary": "summary.json",
         },

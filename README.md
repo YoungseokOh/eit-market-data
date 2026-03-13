@@ -71,6 +71,31 @@ python scripts/crawl_kr_data_fallback.py --start 2025-01-01 --end 2026-03-12
 
 45일보다 오래된 월말 snapshot을 재현할 때는 `cap_daily` backfill이 먼저 있어야 합니다.
 
+## KR News Catalogs
+
+고빈도 종목 뉴스는 month-end에 한 번만 긁으면 Naver archive 200페이지 상한에 걸릴 수 있습니다.
+로컬 research용 KR bundle은 일자별 뉴스 catalog를 누적한 뒤 rolling 30일 window를 재구성하는
+경로를 우선으로 사용합니다.
+
+일별 catalog를 누적하려면:
+
+```bash
+python scripts/capture_kr_news_catalog.py \
+  --storage-root ~/eit-local-data \
+  --as-of 2026-03-31 \
+  --universe-csv universes/kr_universe.csv
+```
+
+catalog는 `~/eit-local-data/catalogs/kr/news/YYYY-MM-DD/*.jsonl.gz` 아래에 저장됩니다.
+
+`scripts/run_local_collection.py`가 만드는 KR bundle은:
+
+- `snapshot.json` / `snapshot.json.gz`
+- `news_coverage.json`
+
+을 함께 저장하며, `snapshot.news`에는 최근 30일 원본 뉴스가 들어갑니다.
+capture gap이 있으면 `news_coverage.json`과 `summary.json`에서 `degraded` 상태로 표시됩니다.
+
 ## WSL2 Notes
 
 - Apply the known-good DNS config with `scripts/apply_wsl_dns_config.sh`

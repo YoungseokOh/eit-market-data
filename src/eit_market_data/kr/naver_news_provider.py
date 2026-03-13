@@ -6,7 +6,7 @@ import asyncio
 import logging
 import re
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, time as datetime_time, timedelta, timezone
 from typing import Any
 from urllib.parse import urljoin
 
@@ -19,8 +19,13 @@ _NAVER_MAIN_NEWS_URL = "https://finance.naver.com/item/main.nhn?code={ticker}"
 _NAVER_NEWS_PAGE_URL = "https://finance.naver.com/item/news.naver?code={ticker}"
 _NAVER_ARCHIVE_URL = "https://finance.naver.com/item/news_news.naver?code={ticker}&page={page}"
 _NAVER_BASE_URL = "https://finance.naver.com"
-_DATE_PATTERN = re.compile(r"(\d{4})\.(\d{2})\.(\d{2})")
+_SEOUL = timezone(timedelta(hours=9))
+_DATE_PATTERN = re.compile(r"(\d{4})\.(\d{2})\.(\d{2})(?:\s+(\d{2}):(\d{2}))?")
 _MONTH_DAY_PATTERN = re.compile(r"(\d{2})/(\d{2})")
+
+
+def _combine_with_default_time(value: date, *, hour: int = 0, minute: int = 0) -> datetime:
+    return datetime.combine(value, datetime_time(hour, minute), tzinfo=_SEOUL)
 
 
 def _parse_naver_date(date_str: str, as_of: date) -> date | None:
@@ -72,6 +77,27 @@ def _parse_naver_date(date_str: str, as_of: date) -> date | None:
     return None
 
 
+def _parse_naver_timestamp(date_str: str, as_of: date) -> datetime | None:
+    """Parse Naver timestamps into timezone-aware datetimes when possible."""
+    if not date_str:
+        return None
+
+    date_str = date_str.strip()
+    match = _DATE_PATTERN.match(date_str)
+    if match:
+        parsed_date = _parse_naver_date(date_str, as_of)
+        if parsed_date is None:
+            return None
+        hour = int(match.group(4) or 0)
+        minute = int(match.group(5) or 0)
+        return _combine_with_default_time(parsed_date, hour=hour, minute=minute)
+
+    parsed_date = _parse_naver_date(date_str, as_of)
+    if parsed_date is None:
+        return None
+    return _combine_with_default_time(parsed_date)
+
+
 def _apply_response_encoding(response: Any) -> None:
     content_type = str(response.headers.get("content-type", "")).lower()
     if "charset=" in content_type:
@@ -92,9 +118,20 @@ def _apply_response_encoding(response: Any) -> None:
 @dataclass(frozen=True)
 class NaverArchiveNewsRecord:
     date: date
+    published_at: datetime | None
     headline: str
     url: str
     source: str = "Naver"
+
+
+@dataclass(frozen=True)
+class NaverArchiveFetchResult:
+    records: list[NaverArchiveNewsRecord]
+    required_start: date
+    oldest_kept: date | None
+    fetched_pages: int
+    reached_page_cap: bool
+    last_in_window_date: date | None
 
 
 class NaverNewsProvider:
@@ -169,6 +206,7 @@ class NaverNewsProvider:
                 news_date = _parse_naver_date(date_text, as_of)
                 if news_date is None:
                     continue
+                published_at = _parse_naver_timestamp(date_text, as_of)
 
                 if news_date > as_of:
                     continue
@@ -179,7 +217,9 @@ class NaverNewsProvider:
                     NewsItem(
                         headline=headline,
                         date=news_date,
+                        published_at=published_at,
                         source="Naver",
+                        url=urljoin(_NAVER_BASE_URL, href),
                     )
                 )
 
@@ -195,7 +235,7 @@ class NaverNewsProvider:
 
 
 class NaverArchiveNewsProvider:
-    """Fetch month-complete Korean stock news from Naver Finance archive pages."""
+    """Fetch windowed Korean stock news from Naver Finance archive pages."""
 
     def __init__(
         self,
@@ -228,7 +268,9 @@ class NaverArchiveNewsProvider:
             NewsItem(
                 headline=record.headline,
                 date=record.date,
+                published_at=record.published_at,
                 source=record.source,
+                url=record.url,
             )
             for record in records
         ]
@@ -239,11 +281,24 @@ class NaverArchiveNewsProvider:
         as_of: date,
         lookback_days: int = 30,
     ) -> list[NaverArchiveNewsRecord]:
+        result = await self.fetch_archive_result(
+            ticker=ticker,
+            as_of=as_of,
+            lookback_days=lookback_days,
+        )
+        return result.records
+
+    async def fetch_archive_result(
+        self,
+        ticker: str,
+        as_of: date,
+        lookback_days: int = 30,
+    ) -> NaverArchiveFetchResult:
         norm_ticker = normalize_ticker(ticker)
         async with self._semaphore:
             try:
                 return await asyncio.to_thread(
-                    self._fetch_archive_records_sync,
+                    self._fetch_archive_result_sync,
                     norm_ticker,
                     as_of,
                     lookback_days,
@@ -252,7 +307,14 @@ class NaverArchiveNewsProvider:
                 logger.warning("Naver archive fetch failed for %s: %s", norm_ticker, e)
                 if self._raise_on_error:
                     raise
-                return []
+                return NaverArchiveFetchResult(
+                    records=[],
+                    required_start=as_of - timedelta(days=max(lookback_days - 1, 0)),
+                    oldest_kept=None,
+                    fetched_pages=0,
+                    reached_page_cap=False,
+                    last_in_window_date=None,
+                )
 
     def _fetch_archive_records_sync(
         self,
@@ -260,13 +322,30 @@ class NaverArchiveNewsProvider:
         as_of: date,
         lookback_days: int,
     ) -> list[NaverArchiveNewsRecord]:
+        result = self._fetch_archive_result_sync(ticker, as_of, lookback_days)
+        return result.records
+
+    def _fetch_archive_result_sync(
+        self,
+        ticker: str,
+        as_of: date,
+        lookback_days: int,
+    ) -> NaverArchiveFetchResult:
         try:
             import requests
             from bs4 import BeautifulSoup
             import time
         except ImportError as e:
             logger.warning("requests/BeautifulSoup required for Naver archive news: %s", e)
-            return []
+            required_start = as_of - timedelta(days=max(lookback_days - 1, 0))
+            return NaverArchiveFetchResult(
+                records=[],
+                required_start=required_start,
+                oldest_kept=None,
+                fetched_pages=0,
+                reached_page_cap=False,
+                last_in_window_date=None,
+            )
 
         required_start = as_of - timedelta(days=max(lookback_days - 1, 0))
         session = requests.Session()
@@ -282,9 +361,14 @@ class NaverArchiveNewsProvider:
         records: list[NaverArchiveNewsRecord] = []
         last_page_signature: tuple[str, ...] | None = None
         oldest_kept: date | None = None
+        fetched_pages = 0
+        reached_page_cap = False
+        last_in_window_date: date | None = None
+        terminated_early = False
 
         try:
             for page in range(1, self._max_pages + 1):
+                fetched_pages = page
                 response = session.get(
                     _NAVER_ARCHIVE_URL.format(ticker=ticker, page=page),
                     headers=headers,
@@ -297,30 +381,38 @@ class NaverArchiveNewsProvider:
                 page_records = self._extract_archive_page(soup, as_of)
                 page_signature = tuple(record.url for record in page_records[:10])
                 if not page_records:
+                    terminated_early = True
                     break
                 if last_page_signature is not None and page_signature == last_page_signature:
+                    terminated_early = True
                     break
                 last_page_signature = page_signature
 
                 page_has_target_month = False
                 page_has_older_rows = False
+                page_window_dates: list[date] = []
                 for record in page_records:
                     if record.date > as_of:
                         continue
                     if record.date < required_start:
                         page_has_older_rows = True
                         continue
+                    page_window_dates.append(record.date)
                     if record.url in seen_urls:
                         continue
                     seen_urls.add(record.url)
                     records.append(record)
                     oldest_kept = record.date if oldest_kept is None else min(oldest_kept, record.date)
                     page_has_target_month = True
+                if page_window_dates:
+                    last_in_window_date = min(page_window_dates)
 
                 if not page_has_target_month and page_has_older_rows:
+                    terminated_early = True
                     break
                 if self._page_delay_seconds > 0:
                     time.sleep(self._page_delay_seconds)
+            reached_page_cap = fetched_pages == self._max_pages and not terminated_early
         except requests.RequestException as e:
             logger.warning("Request failed for Naver archive news %s: %s", ticker, e)
         except Exception as e:
@@ -328,13 +420,26 @@ class NaverArchiveNewsProvider:
         finally:
             session.close()
 
-        records.sort(key=lambda item: (item.date, item.headline), reverse=True)
+        records.sort(
+            key=lambda item: (
+                item.published_at or _combine_with_default_time(item.date),
+                item.headline,
+            ),
+            reverse=True,
+        )
         if self._require_full_coverage and records and (oldest_kept is None or oldest_kept > required_start):
             raise RuntimeError(
                 f"Naver archive did not reach required start date for {ticker}: "
                 f"oldest_kept={oldest_kept} required_start={required_start}"
             )
-        return records
+        return NaverArchiveFetchResult(
+            records=records,
+            required_start=required_start,
+            oldest_kept=oldest_kept,
+            fetched_pages=fetched_pages,
+            reached_page_cap=reached_page_cap,
+            last_in_window_date=last_in_window_date,
+        )
 
     def _extract_archive_page(
         self,
@@ -362,11 +467,13 @@ class NaverArchiveNewsProvider:
             news_date = _parse_naver_date(date_elem.get_text(" ", strip=True), as_of)
             if news_date is None:
                 continue
+            published_at = _parse_naver_timestamp(date_elem.get_text(" ", strip=True), as_of)
 
             source = source_elem.get_text(" ", strip=True) if source_elem else "Naver"
             records.append(
                 NaverArchiveNewsRecord(
                     date=news_date,
+                    published_at=published_at,
                     headline=headline,
                     source=source or "Naver",
                     url=urljoin(_NAVER_BASE_URL, href),

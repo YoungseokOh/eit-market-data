@@ -1,13 +1,15 @@
 from __future__ import annotations
 import sys
 import types
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlparse
 
 from eit_market_data.kr.naver_news_provider import (
+    NaverArchiveFetchResult,
     NaverArchiveNewsProvider,
     NaverNewsProvider,
     _parse_naver_date,
+    _parse_naver_timestamp,
 )
 
 
@@ -78,6 +80,13 @@ def test_parse_naver_date_supports_relative_and_year_rollover() -> None:
     assert _parse_naver_date("15분전", as_of) == as_of
 
 
+def test_parse_naver_timestamp_supports_full_datetime() -> None:
+    as_of = date(2026, 3, 12)
+    parsed = _parse_naver_timestamp("2026.03.12 14:05", as_of)
+
+    assert parsed == datetime(2026, 3, 12, 14, 5, tzinfo=timezone(timedelta(hours=9)))
+
+
 def test_fetch_news_parses_main_page_news_section(monkeypatch) -> None:
     _install_dummy_requests(
         monkeypatch,
@@ -108,6 +117,8 @@ def test_fetch_news_parses_main_page_news_section(monkeypatch) -> None:
     assert [item.date for item in items] == [date(2026, 3, 12), date(2026, 3, 11)]
     assert all(item.source == "Naver" for item in items)
     assert all(item.summary == "" for item in items)
+    assert items[0].url == "https://finance.naver.com/item/news_read.naver?article_id=1&office_id=001&code=005930"
+    assert items[0].published_at is not None
 
 
 def test_fetch_news_returns_empty_when_section_missing(monkeypatch) -> None:
@@ -135,12 +146,12 @@ def test_fetch_archive_records_sync_dedupes_and_keeps_target_month(monkeypatch) 
               <tr>
                 <td class="title"><a href="/item/news_read.naver?article_id=1&code=005930">첫 기사</a></td>
                 <td class="info">연합</td>
-                <td class="date">2026.03.12</td>
+                <td class="date">2026.03.12 09:01</td>
               </tr>
               <tr>
                 <td class="title"><a href="/item/news_read.naver?article_id=2&code=005930">둘째 기사</a></td>
                 <td class="info">매체B</td>
-                <td class="date">2026.03.10</td>
+                <td class="date">2026.03.10 08:10</td>
               </tr>
             </table>
             """,
@@ -149,12 +160,12 @@ def test_fetch_archive_records_sync_dedupes_and_keeps_target_month(monkeypatch) 
               <tr>
                 <td class="title"><a href="/item/news_read.naver?article_id=2&code=005930">둘째 기사</a></td>
                 <td class="info">매체B</td>
-                <td class="date">2026.03.10</td>
+                <td class="date">2026.03.10 08:10</td>
               </tr>
               <tr>
                 <td class="title"><a href="/item/news_read.naver?article_id=3&code=005930">셋째 기사</a></td>
                 <td class="info">매체C</td>
-                <td class="date">2026.03.01</td>
+                <td class="date">2026.03.01 07:05</td>
               </tr>
               <tr>
                 <td class="title"><a href="/item/news_read.naver?article_id=4&code=005930">이전달 기사</a></td>
@@ -183,6 +194,45 @@ def test_fetch_archive_records_sync_dedupes_and_keeps_target_month(monkeypatch) 
         date(2026, 3, 1),
     ]
     assert len({record.url for record in records}) == 3
+    assert records[0].published_at == datetime(2026, 3, 12, 9, 1, tzinfo=timezone(timedelta(hours=9)))
+
+
+def test_fetch_archive_result_reports_page_cap_for_trailing_day(monkeypatch) -> None:
+    _install_dummy_archive_requests(
+        monkeypatch,
+        pages={
+            1: """
+            <table class="type5">
+              <tr>
+                <td class="title"><a href="/item/news_read.naver?article_id=1&code=005930">첫 기사</a></td>
+                <td class="info">연합</td>
+                <td class="date">2026.03.12 10:00</td>
+              </tr>
+              <tr>
+                <td class="title"><a href="/item/news_read.naver?article_id=2&code=005930">둘째 기사</a></td>
+                <td class="info">매체B</td>
+                <td class="date">2026.03.10 08:10</td>
+              </tr>
+            </table>
+            """,
+        },
+        expected_referer="https://finance.naver.com/item/news.naver?code=005930",
+    )
+
+    result: NaverArchiveFetchResult = NaverArchiveNewsProvider(
+        max_pages=1,
+        page_delay_seconds=0,
+        require_full_coverage=False,
+        raise_on_error=True,
+    )._fetch_archive_result_sync(
+        "005930",
+        date(2026, 3, 12),
+        lookback_days=12,
+    )
+
+    assert result.reached_page_cap is True
+    assert result.last_in_window_date == date(2026, 3, 10)
+    assert len(result.records) == 2
 
 
 def test_fetch_archive_records_sync_raises_when_full_coverage_not_reached(monkeypatch) -> None:

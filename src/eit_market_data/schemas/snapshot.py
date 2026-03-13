@@ -6,7 +6,7 @@ strict point-in-time discipline (no look-ahead bias).
 
 from __future__ import annotations
 
-from datetime import date  # noqa: TC003
+from datetime import date, datetime  # noqa: TC003
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -110,9 +110,11 @@ class NewsItem(BaseModel):
     """A single news headline/article."""
 
     date: date
+    published_at: datetime | None = None
     source: str = ""
     headline: str
     summary: str = ""
+    url: str | None = None
 
 
 # ---------------------------------------------------------------------------

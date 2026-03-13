@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
 
+from eit_market_data.kr.news_catalog import KrNewsWindowCoverage
 from eit_market_data.kr.naver_news_provider import NaverArchiveNewsRecord
 from eit_market_data.local_collection import (
     ValidationCheck,
@@ -67,11 +68,11 @@ def test_build_run_root_is_stable() -> None:
     assert str(path) == "/tmp/storage/runs/2026-03-31/both_all_top300"
 
 
-def test_validate_kr_final_snapshot_rejects_news_outside_target_month() -> None:
+def test_validate_kr_final_snapshot_rejects_news_outside_target_window() -> None:
     ticker = "005930"
     snapshot = _snapshot_with_news(
         [
-            NewsItem(date=date(2026, 2, 28), source="Naver", headline="이전달 기사"),
+            NewsItem(date=date(2026, 2, 28), source="Naver", headline="창밖 기사"),
         ]
     )
 
@@ -81,16 +82,70 @@ def test_validate_kr_final_snapshot_rejects_news_outside_target_month() -> None:
             ticker: [
                 NaverArchiveNewsRecord(
                     date=date(2026, 2, 28),
-                    headline="이전달 기사",
+                    published_at=datetime(2026, 2, 28, 9, 0, tzinfo=timezone(timedelta(hours=9))),
+                    headline="창밖 기사",
                     url="https://finance.naver.com/item/news_read.naver?article_id=1",
                 )
             ]
+        },
+        news_coverage={
+            ticker: KrNewsWindowCoverage(
+                ticker=ticker,
+                window_start=date(2026, 3, 2),
+                window_end=date(2026, 3, 31),
+                raw_count=1,
+                captured_days=30,
+                missing_capture_days=[],
+                page_cap_hit_days=[],
+                status="ok",
+            )
         },
         as_of=date(2026, 3, 31),
     )
 
     assert any(
-        check.name == f"kr:final_news:{ticker}" and check.detail == "date_out_of_month"
+        check.name == f"kr:final_news:{ticker}" and check.detail == "date_out_of_window"
+        for check in checks
+    )
+
+
+def test_validate_kr_final_snapshot_marks_missing_capture_days_degraded() -> None:
+    ticker = "005930"
+    snapshot = _snapshot_with_news(
+        [
+            NewsItem(date=date(2026, 3, 31), source="Naver", headline="당일 기사"),
+        ]
+    )
+
+    checks = validate_kr_final_snapshot(
+        snapshot=snapshot,
+        news_audit={
+            ticker: [
+                NaverArchiveNewsRecord(
+                    date=date(2026, 3, 31),
+                    published_at=datetime(2026, 3, 31, 9, 0, tzinfo=timezone(timedelta(hours=9))),
+                    headline="당일 기사",
+                    url="https://finance.naver.com/item/news_read.naver?article_id=1",
+                )
+            ]
+        },
+        news_coverage={
+            ticker: KrNewsWindowCoverage(
+                ticker=ticker,
+                window_start=date(2026, 3, 2),
+                window_end=date(2026, 3, 31),
+                raw_count=1,
+                captured_days=29,
+                missing_capture_days=["2026-03-02"],
+                page_cap_hit_days=[],
+                status="degraded",
+            )
+        },
+        as_of=date(2026, 3, 31),
+    )
+
+    assert any(
+        check.name == f"kr:final_news_coverage:{ticker}" and check.status == "degraded"
         for check in checks
     )
 

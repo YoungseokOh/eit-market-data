@@ -7,6 +7,7 @@ MonthlySnapshot, enforcing strict look-ahead prevention.
 from __future__ import annotations
 
 import asyncio
+import gzip
 import hashlib
 import json
 import logging
@@ -291,6 +292,8 @@ class SnapshotBuilder:
         meta_path = artifacts_dir / "metadata.json"
         meta_path.write_text(snapshot.metadata.model_dump_json(indent=2))
         snapshot_path = artifacts_dir / MONTHLY_SNAPSHOT_FILENAME
-        snapshot_path.write_text(snapshot.model_dump_json(indent=2))
+        snapshot_text = snapshot.model_dump_json(indent=2)
+        snapshot_path.write_text(snapshot_text)
+        (artifacts_dir / "snapshot.json.gz").write_bytes(gzip.compress(snapshot_text.encode("utf-8")))
 
         return snapshot

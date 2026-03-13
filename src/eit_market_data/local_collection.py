@@ -21,6 +21,10 @@ from eit_market_data.kr.dart_provider import DartProvider
 from eit_market_data.kr.ecos_provider import EcosMacroProvider
 from eit_market_data.kr.fundamental_provider import CompositeKrFundamentalProvider
 from eit_market_data.kr.market_helpers import fetch_market_cap_frame, normalize_ticker
+from eit_market_data.kr.news_catalog import (
+    KrNewsCatalogStore,
+    KrNewsWindowCoverage,
+)
 from eit_market_data.kr.naver_news_provider import (
     NaverArchiveNewsProvider,
     NaverArchiveNewsRecord,
@@ -41,6 +45,7 @@ from eit_market_data.snapshot import SnapshotConfig, config_hash
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_US_UNIVERSE = "AAPL,MSFT,GOOGL,AMZN,NVDA"
 CURRENT_KR_UNIVERSE_CSV = PROJECT_ROOT / "universes" / "kr_universe.csv"
+NEWS_LOOKBACK_DAYS = 30
 
 
 class ValidationError(RuntimeError):
@@ -69,6 +74,7 @@ class BatchPayload:
     filings: dict[str, FilingData]
     news: dict[str, list[NewsItem]]
     news_audit: dict[str, list[NaverArchiveNewsRecord]]
+    news_coverage: dict[str, KrNewsWindowCoverage]
 
     def merge(self, payload: "BatchPayload") -> None:
         self.tickers.extend(payload.tickers)
@@ -77,6 +83,7 @@ class BatchPayload:
         self.filings.update(payload.filings)
         self.news.update(payload.news)
         self.news_audit.update(payload.news_audit)
+        self.news_coverage.update(payload.news_coverage)
 
 
 @dataclass
@@ -86,6 +93,7 @@ class KrCollectionState:
     filings: dict[str, FilingData] = field(default_factory=dict)
     news: dict[str, list[NewsItem]] = field(default_factory=dict)
     news_audit: dict[str, list[NaverArchiveNewsRecord]] = field(default_factory=dict)
+    news_coverage: dict[str, KrNewsWindowCoverage] = field(default_factory=dict)
 
     def merge(self, payload: BatchPayload) -> None:
         self.prices.update(payload.prices)
@@ -93,6 +101,7 @@ class KrCollectionState:
         self.filings.update(payload.filings)
         self.news.update(payload.news)
         self.news_audit.update(payload.news_audit)
+        self.news_coverage.update(payload.news_coverage)
 
 
 def _now_utc() -> str:
@@ -128,6 +137,10 @@ def _next_month(value: date) -> date:
     if value.month == 12:
         return date(value.year + 1, 1, 1)
     return date(value.year, value.month + 1, 1)
+
+
+def _news_window_start(as_of: date, lookback_days: int = NEWS_LOOKBACK_DAYS) -> date:
+    return as_of - timedelta(days=max(lookback_days - 1, 0))
 
 
 def default_raw_start(as_of: date) -> date:
@@ -445,6 +458,10 @@ def _serialize_batch(payload: BatchPayload) -> dict[str, Any]:
             ticker: [asdict(item) for item in items]
             for ticker, items in payload.news_audit.items()
         },
+        "news_coverage": {
+            ticker: asdict(item)
+            for ticker, item in payload.news_coverage.items()
+        },
     }
 
 
@@ -472,6 +489,11 @@ def _load_batch_payload(path: Path) -> BatchPayload:
             ticker: [
                 NaverArchiveNewsRecord(
                     date=date.fromisoformat(item["date"]),
+                    published_at=(
+                        datetime.fromisoformat(item["published_at"])
+                        if item.get("published_at")
+                        else None
+                    ),
                     headline=str(item["headline"]),
                     url=str(item["url"]),
                     source=str(item.get("source", "Naver")),
@@ -480,6 +502,21 @@ def _load_batch_payload(path: Path) -> BatchPayload:
             ]
             for ticker, items in payload.get("news_audit", {}).items()
         },
+        news_coverage={
+            ticker: KrNewsWindowCoverage(
+                ticker=str(item["ticker"]),
+                window_start=date.fromisoformat(item["window_start"]),
+                window_end=date.fromisoformat(item["window_end"]),
+                raw_count=int(item.get("raw_count", 0)),
+                captured_days=int(item.get("captured_days", 0)),
+                missing_capture_days=[
+                    str(value) for value in item.get("missing_capture_days", [])
+                ],
+                page_cap_hit_days=[str(value) for value in item.get("page_cap_hit_days", [])],
+                status=str(item.get("status", "degraded")),
+            )
+            for ticker, item in payload.get("news_coverage", {}).items()
+        },
     )
 
 
@@ -487,10 +524,9 @@ async def validate_kr_checkpoint(
     *,
     state: KrCollectionState,
     as_of: date,
-    news_provider: NaverArchiveNewsProvider,
 ) -> list[ValidationCheck]:
     checks: list[ValidationCheck] = []
-    month_start = _month_start(as_of)
+    window_start = _news_window_start(as_of)
     for ticker, bars in state.prices.items():
         dates = [bar.date for bar in bars]
         if not dates:
@@ -518,46 +554,46 @@ async def validate_kr_checkpoint(
 
     for ticker, items in state.news.items():
         audit = state.news_audit.get(ticker, [])
+        coverage = state.news_coverage.get(ticker)
         seen_urls: set[str] = set()
         if len(items) != len(audit):
             checks.append(ValidationCheck(f"kr:news:{ticker}", "failed", "audit_count_mismatch"))
             continue
         for item, record in zip(items, audit, strict=True):
-            if item.date != record.date or item.headline != record.headline:
+            if (
+                item.date != record.date
+                or item.headline != record.headline
+                or item.url != record.url
+                or item.published_at != record.published_at
+            ):
                 checks.append(ValidationCheck(f"kr:news:{ticker}", "failed", "record_mismatch"))
                 break
-            if item.date < month_start or item.date > as_of:
-                checks.append(ValidationCheck(f"kr:news:{ticker}", "failed", "date_out_of_month"))
+            if item.date < window_start or item.date > as_of:
+                checks.append(ValidationCheck(f"kr:news:{ticker}", "failed", "date_out_of_window"))
                 break
             if record.url in seen_urls:
                 checks.append(ValidationCheck(f"kr:news:{ticker}", "failed", "duplicate_url"))
                 break
             seen_urls.add(record.url)
-
-    sample_ticker = next((ticker for ticker, items in state.news_audit.items() if items), None)
-    if sample_ticker is not None:
-        refetched = await news_provider.fetch_archive_records(
-            sample_ticker,
-            as_of=as_of,
-            lookback_days=(as_of - month_start).days + 1,
-        )
-        stored = state.news_audit[sample_ticker]
-        compare_count = min(5, len(stored), len(refetched))
-        if compare_count == 0 and stored:
-            checks.append(ValidationCheck("kr:news:sample_refetch", "failed", "sample_refetch_empty"))
-        else:
-            left = [
-                (stored[idx].date.isoformat(), stored[idx].headline, stored[idx].url)
-                for idx in range(compare_count)
-            ]
-            right = [
-                (refetched[idx].date.isoformat(), refetched[idx].headline, refetched[idx].url)
-                for idx in range(compare_count)
-            ]
-            if left != right:
-                checks.append(ValidationCheck("kr:news:sample_refetch", "failed", "sample_refetch_mismatch"))
-            else:
-                checks.append(ValidationCheck("kr:news:sample_refetch", "ok", sample_ticker))
+        if coverage is None:
+            checks.append(ValidationCheck(f"kr:news_coverage:{ticker}", "failed", "missing"))
+            continue
+        if coverage.window_start != window_start or coverage.window_end != as_of:
+            checks.append(ValidationCheck(f"kr:news_coverage:{ticker}", "failed", "window_mismatch"))
+            continue
+        if coverage.status != "ok":
+            checks.append(
+                ValidationCheck(
+                    f"kr:news_coverage:{ticker}",
+                    "degraded",
+                    coverage.status,
+                    metrics={
+                        "raw_count": coverage.raw_count,
+                        "missing_capture_days": len(coverage.missing_capture_days),
+                        "page_cap_hit_days": len(coverage.page_cap_hit_days),
+                    },
+                )
+            )
     return checks
 
 
@@ -565,10 +601,11 @@ def validate_kr_final_snapshot(
     *,
     snapshot: MonthlySnapshot,
     news_audit: dict[str, list[NaverArchiveNewsRecord]],
+    news_coverage: dict[str, KrNewsWindowCoverage],
     as_of: date,
 ) -> list[ValidationCheck]:
     checks: list[ValidationCheck] = []
-    month_start = _month_start(as_of)
+    window_start = _news_window_start(as_of)
     if snapshot.decision_date != as_of:
         checks.append(ValidationCheck("kr:decision_date", "failed", "decision_date_mismatch"))
     if len(snapshot.universe) != len(snapshot.prices):
@@ -585,11 +622,28 @@ def validate_kr_final_snapshot(
         checks.append(ValidationCheck("kr:macro", "degraded", "empty"))
     for ticker, items in snapshot.news.items():
         audit = news_audit.get(ticker, [])
+        coverage = news_coverage.get(ticker)
         if len(items) != len(audit):
             checks.append(ValidationCheck(f"kr:final_news:{ticker}", "failed", "audit_count_mismatch"))
             continue
-        if any(item.date < month_start or item.date > as_of for item in items):
-            checks.append(ValidationCheck(f"kr:final_news:{ticker}", "failed", "date_out_of_month"))
+        if any(item.date < window_start or item.date > as_of for item in items):
+            checks.append(ValidationCheck(f"kr:final_news:{ticker}", "failed", "date_out_of_window"))
+        if coverage is None:
+            checks.append(ValidationCheck(f"kr:final_news_coverage:{ticker}", "failed", "missing"))
+            continue
+        if coverage.status != "ok":
+            checks.append(
+                ValidationCheck(
+                    f"kr:final_news_coverage:{ticker}",
+                    "degraded",
+                    coverage.status,
+                    metrics={
+                        "raw_count": coverage.raw_count,
+                        "missing_capture_days": len(coverage.missing_capture_days),
+                        "page_cap_hit_days": len(coverage.page_cap_hit_days),
+                    },
+                )
+            )
     return checks
 
 
@@ -600,6 +654,7 @@ class LocalKrCollector:
         self,
         *,
         as_of: date,
+        storage_root: Path,
         bundle_root: Path,
         partial_root: Path,
         checkpoint_root: Path,
@@ -608,6 +663,7 @@ class LocalKrCollector:
     ) -> None:
         self.as_of = as_of
         self.month = as_of.strftime("%Y-%m")
+        self.storage_root = storage_root
         self.bundle_root = bundle_root
         self.partial_root = partial_root
         self.checkpoint_root = checkpoint_root
@@ -622,10 +678,11 @@ class LocalKrCollector:
             raise_on_error=True,
         )
         self.pykrx._fundamental_provider = self.fundamentals
+        self.news_catalog = KrNewsCatalogStore(storage_root)
         self.news_provider = NaverArchiveNewsProvider(
             max_pages=200,
             page_delay_seconds=0.1,
-            require_full_coverage=True,
+            require_full_coverage=False,
             raise_on_error=True,
         )
         try:
@@ -673,6 +730,7 @@ class LocalKrCollector:
             filings={},
             news={},
             news_audit={},
+            news_coverage={},
         )
 
         while next_index + len(pending.tickers) < len(tickers):
@@ -685,6 +743,7 @@ class LocalKrCollector:
                 filings=dict(state.filings),
                 news=dict(state.news),
                 news_audit=dict(state.news_audit),
+                news_coverage=dict(state.news_coverage),
             )
             preview.merge(pending)
             should_checkpoint = (
@@ -698,7 +757,6 @@ class LocalKrCollector:
             checks = await validate_kr_checkpoint(
                 state=preview,
                 as_of=self.as_of,
-                news_provider=self.news_provider,
             )
             batch_no += 1
             report_path = self.checkpoint_root / f"batch_{batch_no:04d}.json"
@@ -735,6 +793,7 @@ class LocalKrCollector:
                 filings={},
                 news={},
                 news_audit={},
+                news_coverage={},
             )
 
         macro = await self.macro_provider.fetch_macro(self.as_of)
@@ -749,10 +808,11 @@ class LocalKrCollector:
             macro=macro,
             benchmark_prices=benchmark_prices,
         )
-        summary = self._persist_snapshot(snapshot)
+        summary = self._persist_snapshot(snapshot, state)
         final_checks = validate_kr_final_snapshot(
             snapshot=snapshot,
             news_audit=state.news_audit,
+            news_coverage=state.news_coverage,
             as_of=self.as_of,
         )
         final_report_path = self.bundle_root / "snapshots" / self.month / "validation_report.json"
@@ -777,29 +837,23 @@ class LocalKrCollector:
             filings={},
             news={},
             news_audit={},
+            news_coverage={},
         )
-        lookback_days = (self.as_of - _month_start(self.as_of)).days + 1
         prices = await self.pykrx.fetch_prices(ticker, self.as_of, lookback_days=300)
         fundamentals = await self.fundamentals.fetch_fundamentals(ticker, self.as_of, n_quarters=8)
         filing = await self.dart.fetch_filing(ticker, self.as_of)
-        records = await self.news_provider.fetch_archive_records(
-            ticker,
+        news_window = await self.news_catalog.capture_and_build_window(
+            provider=self.news_provider,
+            ticker=ticker,
             as_of=self.as_of,
-            lookback_days=lookback_days,
+            lookback_days=NEWS_LOOKBACK_DAYS,
         )
         payload.prices[ticker] = prices
         payload.fundamentals[ticker] = fundamentals
         payload.filings[ticker] = filing
-        payload.news[ticker] = [
-            NewsItem(
-                date=record.date,
-                source=record.source,
-                headline=record.headline,
-                summary="",
-            )
-            for record in records
-        ]
-        payload.news_audit[ticker] = records
+        payload.news[ticker] = news_window.items
+        payload.news_audit[ticker] = news_window.audit
+        payload.news_coverage[ticker] = news_window.coverage
         if self.inter_ticker_delay_seconds > 0:
             await asyncio.sleep(self.inter_ticker_delay_seconds)
         return payload
@@ -848,19 +902,43 @@ class LocalKrCollector:
             metadata=metadata,
         )
 
-    def _persist_snapshot(self, snapshot: MonthlySnapshot) -> dict[str, Any]:
+    def _persist_snapshot(self, snapshot: MonthlySnapshot, state: KrCollectionState) -> dict[str, Any]:
         month_dir = self.bundle_root / "snapshots" / self.month
         month_dir.mkdir(parents=True, exist_ok=True)
         snapshot_path = month_dir / "snapshot.json"
         metadata_path = month_dir / "metadata.json"
         manifest_path = month_dir / "manifest.json"
         summary_path = month_dir / "summary.json"
+        coverage_path = month_dir / "news_coverage.json"
         gzip_path = month_dir / "snapshot.json.gz"
 
         snapshot_text = snapshot.model_dump_json(indent=2)
         snapshot_path.write_text(snapshot_text, encoding="utf-8")
         gzip_path.write_bytes(gzip.compress(snapshot_text.encode("utf-8")))
         metadata_path.write_text(snapshot.metadata.model_dump_json(indent=2), encoding="utf-8")
+        _write_json(
+            coverage_path,
+            {
+                ticker: {
+                    "ticker": coverage.ticker,
+                    "window_start": coverage.window_start.isoformat(),
+                    "window_end": coverage.window_end.isoformat(),
+                    "raw_count": coverage.raw_count,
+                    "captured_days": coverage.captured_days,
+                    "missing_capture_days": coverage.missing_capture_days,
+                    "page_cap_hit_days": coverage.page_cap_hit_days,
+                    "status": coverage.status,
+                }
+                for ticker, coverage in state.news_coverage.items()
+            },
+        )
+
+        degraded_news_tickers = [
+            ticker for ticker, coverage in state.news_coverage.items() if coverage.status != "ok"
+        ]
+        missing_capture_days = sum(
+            len(coverage.missing_capture_days) for coverage in state.news_coverage.values()
+        )
 
         manifest = {
             "market": "kr",
@@ -871,13 +949,14 @@ class LocalKrCollector:
                 "snapshot": "snapshot.json",
                 "snapshot_gzip": "snapshot.json.gz",
                 "metadata": "metadata.json",
+                "news_coverage": "news_coverage.json",
                 "summary": "summary.json",
             },
         }
         _write_json(manifest_path, manifest)
 
         summary = {
-            "status": "ok",
+            "status": "degraded" if degraded_news_tickers else "ok",
             "market": "kr",
             "month": self.month,
             "decision_date": snapshot.decision_date.isoformat(),
@@ -888,8 +967,11 @@ class LocalKrCollector:
             "filing_tickers": len(snapshot.filings),
             "news_tickers": len(snapshot.news),
             "news_items": sum(len(items) for items in snapshot.news.values()),
+            "news_degraded_tickers": len(degraded_news_tickers),
+            "news_missing_capture_days": missing_capture_days,
             "benchmark_bars": len(snapshot.benchmark_prices),
             "snapshot_path": str(snapshot_path),
+            "news_coverage_path": str(coverage_path),
             "summary_path": str(summary_path),
         }
         _write_json(summary_path, summary)
@@ -1053,6 +1135,7 @@ async def _run_kr_phase(
 
     collector = LocalKrCollector(
         as_of=as_of,
+        storage_root=run_root.parents[2],
         bundle_root=run_root / "bundles" / "kr" / stage_name,
         partial_root=run_root / "partials" / "kr" / stage_name,
         checkpoint_root=run_root / "reports" / "kr" / stage_name,
