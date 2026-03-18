@@ -858,16 +858,15 @@ async def phase3_kr_snapshots(
         snapshot_months[-1] if snapshot_months else "?", profile,
     )
 
-    # Pre-fetch ticker list once (same universe for all months)
-    try:
-        full_tickers: list[str] = _fdr_all_kr_tickers()
-    except Exception as exc:
-        tqdm.write(f"[Phase 3] Ticker list failed: {exc} — using kr_universe.csv")
-        full_tickers = _load_csv_tickers(KR_UNIVERSE_CSV)
+    # Full KR market tickers via FDR (KOSPI + KOSDAQ).
+    # SnapshotBuilder.build() uses Semaphore(8) to avoid API flooding.
+    full_tickers = _fdr_all_kr_tickers()
 
-    todo_months = [m for m in snapshot_months if not (artifacts_root / "snapshots" / "kr" / m / "snapshot.json").exists()]
+    todo_months = [m for m in snapshot_months if not (artifacts_root / "kr" / "snapshots" / m / "snapshot.json").exists()]
     skip_n = len(snapshot_months) - len(todo_months)
     tqdm.write(f"[Phase 3] KR snapshots: {len(snapshot_months)} months ({skip_n} done, {len(todo_months)} remaining), {len(full_tickers)} tickers/month")
+
+    backfill_dart = BackfillDartProvider(BACKFILL_ROOT / "dart")
 
     with tqdm(
         todo_months,
@@ -884,7 +883,6 @@ async def phase3_kr_snapshots(
             lbd = _last_business_day(y, m)
 
             try:
-                backfill_dart = BackfillDartProvider(BACKFILL_ROOT / "dart")
                 builder = SnapshotBuilder(
                     **create_kr_providers(
                         profile=profile,
@@ -910,7 +908,7 @@ async def phase3_kr_snapshots(
 
             except Exception as exc:
                 tqdm.write(f"[Phase 3] ❌ Failed {month_str}: {exc}")
-                snap_dir = artifacts_root / "snapshots" / "kr" / month_str
+                snap_dir = artifacts_root / "kr" / "snapshots" / month_str
                 snap_dir.mkdir(parents=True, exist_ok=True)
                 (snap_dir / "summary.json").write_text(
                     json.dumps({"status": "failed", "month": month_str, "error": str(exc)}, indent=2),
@@ -950,7 +948,7 @@ async def phase4_us_snapshots(
         snapshot_months[-1] if snapshot_months else "?",
     )
 
-    todo_months = [m for m in snapshot_months if not (artifacts_root / "snapshots" / "us" / m / "snapshot.json").exists()]
+    todo_months = [m for m in snapshot_months if not (artifacts_root / "us" / "snapshots" / m / "snapshot.json").exists()]
     skip_n = len(snapshot_months) - len(todo_months)
     tqdm.write(f"[Phase 4] US snapshots: {len(snapshot_months)} months ({skip_n} done, {len(todo_months)} remaining), {len(tickers)} tickers/month")
 
@@ -996,7 +994,7 @@ async def phase4_us_snapshots(
 
             except Exception as exc:
                 tqdm.write(f"[Phase 4] ❌ Failed {month_str}: {exc}")
-                snap_dir = artifacts_root / "snapshots" / "us" / month_str
+                snap_dir = artifacts_root / "us" / "snapshots" / month_str
                 snap_dir.mkdir(parents=True, exist_ok=True)
                 (snap_dir / "summary.json").write_text(
                     json.dumps({"status": "failed", "month": month_str, "error": str(exc)}, indent=2),

@@ -27,7 +27,7 @@ case "${1:-auto}" in
     PHASES=()
 
     # Phase 1: skip if pykrx OHLCV files already exist
-    OHLCV_COUNT=$(find data/backfill/pykrx/market/ohlcv -name "*.parquet" 2>/dev/null | wc -l)
+    OHLCV_COUNT=$(find data/backfill/pykrx/market/ohlcv -name "*.parquet" 2>/dev/null | wc -l || true)
     if [[ "$OHLCV_COUNT" -lt 100 ]]; then
       echo "[auto] Phase 1: pykrx OHLCV not done (${OHLCV_COUNT} parquet files) — will run"
       PHASES+=(1)
@@ -48,12 +48,12 @@ case "${1:-auto}" in
     fi
 
     # Phase 3: KR snapshots — always run (builder skips existing months internally)
-    KR_DONE=$(find artifacts/kr/snapshots -name "snapshot.json" 2>/dev/null | wc -l)
+    KR_DONE=$(find artifacts/kr/snapshots -name "snapshot.json" 2>/dev/null | wc -l || true)
     echo "[auto] Phase 3: KR snapshots (${KR_DONE} months done) — will run remaining"
     PHASES+=(3)
 
     # Phase 4: US snapshots — always run (builder skips existing months internally)
-    US_DONE=$(find artifacts/us/snapshots -name "snapshot.json" 2>/dev/null | wc -l)
+    US_DONE=$(find artifacts/us/snapshots -name "snapshot.json" 2>/dev/null | wc -l || true)
     echo "[auto] Phase 4: US snapshots (${US_DONE} months done) — will run remaining"
     PHASES+=(4)
 

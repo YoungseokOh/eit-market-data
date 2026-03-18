@@ -233,10 +233,17 @@ class SnapshotBuilder:
         ny, nm = _next_month(year, mon)
         execution_date = _first_business_day(ny, nm)
 
-        # Fetch all data concurrently
-        price_tasks = {t: self.price.fetch_prices(t, decision_date) for t in universe}
-        fund_tasks = {t: self.fundamental.fetch_fundamentals(t, decision_date) for t in universe}
-        filing_tasks = {t: self.filing.fetch_filing(t, decision_date) for t in universe}
+        # Throttle concurrent API calls to avoid rate limits
+        sem = asyncio.Semaphore(8)
+
+        async def _limited(coro):
+            async with sem:
+                return await coro
+
+        # Fetch all data with concurrency limit
+        price_tasks = {t: _limited(self.price.fetch_prices(t, decision_date)) for t in universe}
+        fund_tasks = {t: _limited(self.fundamental.fetch_fundamentals(t, decision_date)) for t in universe}
+        filing_tasks = {t: _limited(self.filing.fetch_filing(t, decision_date)) for t in universe}
         macro_task = self.macro.fetch_macro(decision_date)
         sector_map_task = self.sector.fetch_sector_map(universe, as_of=decision_date)
         benchmark_task = self.benchmark.fetch_benchmark(decision_date)
