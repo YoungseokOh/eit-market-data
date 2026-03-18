@@ -51,21 +51,26 @@ async def build_snapshot(
     universe_csv: Path,
     artifacts_root: Path,
     profile: str,
+    market_subdir: str = "",
 ) -> dict[str, object]:
     from eit_market_data.snapshot import SnapshotBuilder, SnapshotConfig, create_kr_providers
 
     month = as_of.strftime("%Y-%m")
     tickers = load_universe_tickers(universe_csv)
+
+    # When market_subdir is set, nest artifacts under that subdirectory
+    effective_root = artifacts_root / market_subdir if market_subdir else artifacts_root
+
     builder = SnapshotBuilder(
         **create_kr_providers(profile=profile, universe_csv=universe_csv)
     )
     snapshot = await builder.build_and_persist(
         month,
         tickers,
-        SnapshotConfig(artifacts_dir=str(artifacts_root)),
+        SnapshotConfig(artifacts_dir=str(effective_root)),
     )
 
-    snapshot_dir = artifacts_root / "snapshots" / month
+    snapshot_dir = effective_root / "snapshots" / month
     field_coverage = _field_coverage(snapshot)
     manifest = {
         "bundle_version": 1,
@@ -87,7 +92,7 @@ async def build_snapshot(
         json.dumps(manifest, indent=2, sort_keys=True),
         encoding="utf-8",
     )
-    summary = _summary_payload(snapshot, month, profile, artifacts_root, field_coverage)
+    summary = _summary_payload(snapshot, month, profile, effective_root, field_coverage)
     (snapshot_dir / "summary.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True),
         encoding="utf-8",
@@ -182,6 +187,11 @@ def main() -> None:
         choices=["official", "official_enriched", "ci_safe"],
         help="Provider profile to use for the KR snapshot build.",
     )
+    parser.add_argument(
+        "--market-subdir",
+        default="",
+        help="Optional market subdirectory under snapshots/ (e.g. 'kr').",
+    )
     args = parser.parse_args()
 
     as_of = date.fromisoformat(args.as_of)
@@ -204,7 +214,9 @@ def main() -> None:
         print("[SKIP] Snapshot build skipped: not month-end business day.")
         return
 
-    summary = asyncio.run(build_snapshot(as_of, universe_csv, artifacts_root, args.profile))
+    summary = asyncio.run(
+        build_snapshot(as_of, universe_csv, artifacts_root, args.profile, args.market_subdir)
+    )
     print(
         f"[DONE] Snapshot built month={summary['month']} "
         f"decision_date={summary['decision_date']} universe={summary['universe_size']}"

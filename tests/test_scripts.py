@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import json
+import logging
 import sys
 from datetime import date
 from pathlib import Path
@@ -337,3 +339,213 @@ def test_build_us_snapshot_supports_external_artifacts_root(monkeypatch, tmp_pat
     summary = result["summary"]
     assert str(tmp_path) in summary["files"]["snapshot"]
     assert (tmp_path / "snapshots" / "2026-03" / "summary.json").exists()
+
+
+def test_backfill_filter_drops_known_pykrx_malformed_record() -> None:
+    module = _load_module(
+        Path("scripts/backfill_all.py"),
+        "backfill_all_filter_test",
+    )
+    malformed = logging.LogRecord(
+        name="root",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg=("KOSPI",),
+        args=({},),
+        exc_info=None,
+    )
+    valid = logging.LogRecord(
+        name="backfill",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg="hello %s",
+        args=("world",),
+        exc_info=None,
+    )
+
+    log_filter = module._DropMalformedFilter()
+
+    assert log_filter.filter(malformed) is False
+    assert log_filter.filter(valid) is True
+
+
+def test_backfill_capture_output_lines_collects_stdout_and_stderr() -> None:
+    module = _load_module(
+        Path("scripts/backfill_all.py"),
+        "backfill_all_capture_test",
+    )
+
+    def _noisy():  # noqa: ANN202
+        print('"000104" invalid symbol or has no data')
+        print("temporary stderr noise", file=sys.stderr)
+        return "ok"
+
+    result, lines = module._capture_output_lines(_noisy)
+
+    assert result == "ok"
+    assert '"000104" invalid symbol or has no data' in lines
+    assert "temporary stderr noise" in lines
+
+
+def test_backfill_phase1_summary_aggregates_failures(monkeypatch) -> None:
+    module = _load_module(
+        Path("scripts/backfill_all.py"),
+        "backfill_all_summary_test",
+    )
+    summary = module._Phase1Summary()
+    collector = module._Phase1MarketCollector("KOSPI", summary)
+    lines: list[str] = []
+
+    collector.warning(
+        "Ticker %s fetch failed in %s: %s",
+        "000104",
+        "fdr",
+        '"000104" invalid symbol or has no data',
+    )
+    summary.record_ohlcv_message("KOSPI", '"000104" invalid symbol or has no data')
+    summary.record_ohlcv_message("KOSPI", "Ticker 000660 fetch failed in naver: timeout")
+    summary.record_pykrx_failure(
+        "get_market_cap",
+        RuntimeError("KRX POST https://data.krx.co.kr: status=400 LOGOUT"),
+        "2022-02 KOSPI",
+    )
+
+    monkeypatch.setattr(module.tqdm, "write", lines.append)
+
+    summary.emit_ohlcv_summary("KOSPI")
+    summary.emit_pykrx_summary()
+
+    assert any("OHLCV KOSPI failures:" in line for line in lines)
+    assert any("invalid symbol or no data=1 tickers (e.g. 000104)" in line for line in lines)
+    assert any("timeout=1 tickers (e.g. 000660)" in line for line in lines)
+    assert any("get_market_cap: status=400 LOGOUT x1 (2022-02 KOSPI)" in line for line in lines)
+
+
+def test_backfill_pykrx_call_uses_error_reporter(monkeypatch) -> None:
+    module = _load_module(
+        Path("scripts/backfill_all.py"),
+        "backfill_all_pykrx_call_test",
+    )
+    events: list[tuple[str, str, str | None]] = []
+
+    def _boom():  # noqa: ANN202
+        raise RuntimeError("status=400 LOGOUT")
+
+    monkeypatch.setattr(module.time, "sleep", lambda *_args, **_kwargs: None)
+
+    result = module._pykrx_call(
+        _boom,
+        on_error=lambda fn_name, exc, context: events.append((fn_name, str(exc), context)),
+        error_context="2022-02 KOSPI",
+    )
+
+    assert result is None
+    assert events == [("_boom", "status=400 LOGOUT", "2022-02 KOSPI")]
+
+
+# ---------------------------------------------------------------------------
+# BackfillDartProvider tests
+# ---------------------------------------------------------------------------
+
+
+def _make_backfill_json(ticker: str, quarters: list[dict], filing: dict | None = None) -> dict:
+    """Build a Phase 2 backfill JSON payload for testing."""
+    return {
+        "ticker": ticker,
+        "as_of": "2026-03-18",
+        "fundamentals": {"ticker": ticker, "quarters": quarters},
+        "filing": filing or {"ticker": ticker},
+    }
+
+
+def test_backfill_dart_provider_returns_fundamentals(tmp_path: Path) -> None:
+    module = _load_module(
+        Path("scripts/backfill_all.py"),
+        "backfill_all_dart_test",
+    )
+    quarters = [
+        {"fiscal_quarter": "2025Q4", "report_date": "2026-03-10", "revenue": 100.0},
+        {"fiscal_quarter": "2025Q3", "report_date": "2025-11-14", "revenue": 80.0},
+    ]
+    backfill_dir = tmp_path / "dart"
+    backfill_dir.mkdir()
+    (backfill_dir / "005930.json").write_text(
+        json.dumps(_make_backfill_json("005930", quarters)), encoding="utf-8",
+    )
+
+    provider = module.BackfillDartProvider(backfill_dir)
+    result = asyncio.run(provider.fetch_fundamentals("005930", date(2026, 3, 18)))
+
+    assert result.ticker == "005930"
+    assert len(result.quarters) == 2
+    assert result.quarters[0].fiscal_quarter == "2025Q4"
+
+
+def test_backfill_dart_provider_filters_look_ahead(tmp_path: Path) -> None:
+    module = _load_module(
+        Path("scripts/backfill_all.py"),
+        "backfill_all_dart_pit_test",
+    )
+    quarters = [
+        {"fiscal_quarter": "2025Q4", "report_date": "2026-03-10", "revenue": 100.0},
+        {"fiscal_quarter": "2025Q3", "report_date": "2025-11-14", "revenue": 80.0},
+        {"fiscal_quarter": "2025Q2", "report_date": "2025-08-14", "revenue": 70.0},
+    ]
+    backfill_dir = tmp_path / "dart"
+    backfill_dir.mkdir()
+    (backfill_dir / "005930.json").write_text(
+        json.dumps(_make_backfill_json("005930", quarters)), encoding="utf-8",
+    )
+
+    provider = module.BackfillDartProvider(backfill_dir)
+    # as_of = 2025-12-31 → only Q3 and Q2 should be included (report_date <= as_of)
+    result = asyncio.run(provider.fetch_fundamentals("005930", date(2025, 12, 31)))
+
+    assert len(result.quarters) == 2
+    assert result.quarters[0].fiscal_quarter == "2025Q3"
+    assert result.quarters[1].fiscal_quarter == "2025Q2"
+
+
+def test_backfill_dart_provider_missing_ticker_returns_empty(tmp_path: Path) -> None:
+    module = _load_module(
+        Path("scripts/backfill_all.py"),
+        "backfill_all_dart_empty_test",
+    )
+    backfill_dir = tmp_path / "dart"
+    backfill_dir.mkdir()
+
+    provider = module.BackfillDartProvider(backfill_dir)
+    fund = asyncio.run(provider.fetch_fundamentals("999999", date(2026, 3, 18)))
+    filing = asyncio.run(provider.fetch_filing("999999", date(2026, 3, 18)))
+
+    assert fund.ticker == "999999"
+    assert fund.quarters == []
+    assert filing.ticker == "999999"
+
+
+def test_backfill_dart_provider_filing_point_in_time(tmp_path: Path) -> None:
+    module = _load_module(
+        Path("scripts/backfill_all.py"),
+        "backfill_all_dart_filing_pit_test",
+    )
+    filing = {
+        "ticker": "005930",
+        "filing_date": "2026-03-10",
+        "business_overview": "Samsung overview",
+    }
+    backfill_dir = tmp_path / "dart"
+    backfill_dir.mkdir()
+    (backfill_dir / "005930.json").write_text(
+        json.dumps(_make_backfill_json("005930", [], filing)), encoding="utf-8",
+    )
+
+    provider = module.BackfillDartProvider(backfill_dir)
+    # as_of before filing_date → should return empty
+    result = asyncio.run(provider.fetch_filing("005930", date(2025, 12, 31)))
+    assert result.business_overview is None
+
+    # as_of after filing_date → should return full filing
+    result = asyncio.run(provider.fetch_filing("005930", date(2026, 3, 18)))
+    assert result.business_overview == "Samsung overview"

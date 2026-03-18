@@ -53,6 +53,7 @@ async def build_us_snapshot(
     as_of: date,
     universe: list[str],
     artifacts_root: Path | None = None,
+    market_subdir: str = "",
 ) -> dict[str, object]:
     """Build US snapshot and save outputs.
 
@@ -60,12 +61,14 @@ async def build_us_snapshot(
         as_of: Decision date (point-in-time)
         universe: List of tickers (e.g., ["AAPL", "MSFT"])
         artifacts_root: Output directory (default: PROJECT_ROOT/artifacts)
+        market_subdir: Optional market subdirectory (e.g. "us")
 
     Returns:
         Summary dict with status and paths
     """
     artifacts_root = artifacts_root or PROJECT_ROOT / "artifacts"
-    month_dir = artifacts_root / "snapshots" / as_of.strftime("%Y-%m")
+    effective_root = artifacts_root / market_subdir if market_subdir else artifacts_root
+    month_dir = effective_root / "snapshots" / as_of.strftime("%Y-%m")
     month_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info(
@@ -77,7 +80,7 @@ async def build_us_snapshot(
         # Create providers (YFinance + FRED + EDGAR)
         providers = create_real_providers()
         builder = SnapshotBuilder(**providers)
-        config = SnapshotConfig(artifacts_dir=str(artifacts_root))
+        config = SnapshotConfig(artifacts_dir=str(effective_root))
 
         # Build snapshot
         month_str = as_of.strftime("%Y-%m")
@@ -197,6 +200,11 @@ def main() -> None:
         "--artifacts-root",
         help="Output directory for snapshots (default: PROJECT_ROOT/artifacts).",
     )
+    parser.add_argument(
+        "--market-subdir",
+        default="",
+        help="Optional market subdirectory under snapshots/ (e.g. 'us').",
+    )
 
     args = parser.parse_args()
 
@@ -205,7 +213,12 @@ def main() -> None:
     artifacts_root = Path(args.artifacts_root) if args.artifacts_root else None
 
     exit_code = asyncio.run(
-        build_us_snapshot(as_of=as_of, universe=universe, artifacts_root=artifacts_root)
+        build_us_snapshot(
+            as_of=as_of,
+            universe=universe,
+            artifacts_root=artifacts_root,
+            market_subdir=args.market_subdir,
+        )
     )
 
     if isinstance(exit_code, dict) and exit_code.get("status") == "ok":

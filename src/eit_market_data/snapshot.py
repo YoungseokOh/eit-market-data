@@ -15,7 +15,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from eit_market_data.synthetic import SyntheticProvider
 from eit_market_data.schemas.snapshot import MonthlySnapshot, SnapshotMetadata
@@ -59,11 +59,15 @@ def create_kr_providers(
     profile: Literal["official", "official_enriched", "ci_safe"] = "official",
     *,
     universe_csv: str | Path | None = None,
+    dart_override: Any | None = None,
 ) -> dict:
     """Create Korean market data providers.
 
     Returns dict of keyword arguments for SnapshotBuilder.
     Requires: pip install -e '.[kr]'
+
+    If *dart_override* is given it replaces the default ``DartProvider``
+    for both fundamentals and filings, skipping any DART API initialisation.
     """
     from eit_market_data.kr.fundamental_provider import CompositeKrFundamentalProvider
     from eit_market_data.kr.ci_safe_provider import (
@@ -78,11 +82,14 @@ def create_kr_providers(
     from eit_market_data.kr.dart_provider import DartProvider
     from eit_market_data.kr.pykrx_provider import PykrxProvider
 
-    try:
-        dart = DartProvider()
-    except (ImportError, ValueError) as exc:
-        logger.warning("Falling back to NullDartProvider: %s", exc)
-        dart = NullDartProvider()
+    if dart_override is not None:
+        dart = dart_override
+    else:
+        try:
+            dart = DartProvider()
+        except (ImportError, ValueError) as exc:
+            logger.warning("Falling back to NullDartProvider: %s", exc)
+            dart = NullDartProvider()
     try:
         macro = EcosMacroProvider()
     except (ImportError, ValueError) as exc:
