@@ -8,14 +8,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import date, timedelta
+from datetime import date
 from typing import Any
 
 from eit_market_data.kr.market_helpers import (
     date_to_yyyymmdd,
     fetch_market_cap_frame,
-    fetch_stock_ohlcv_frame,
-    latest_krx_trading_day,
     normalize_ticker,
 )
 from eit_market_data.schemas.snapshot import FundamentalData
@@ -44,7 +42,10 @@ class CompositeKrFundamentalProvider:
         self._use_market_snapshot = use_market_snapshot
         self._raise_on_error = raise_on_error
         self._market_cap_cache: dict[str, Any] = {}
-        self._semaphore = asyncio.Semaphore(2)
+        self._semaphore = asyncio.Semaphore(16)
+        # Cache final FundamentalData by (ticker, as_of) so sector_avg_tasks
+        # that call fetch_fundamentals() a second time get instant hits.
+        self._fundamentals_cache: dict[tuple[str, date], FundamentalData] = {}
 
     async def fetch_fundamentals(
         self,
@@ -53,7 +54,16 @@ class CompositeKrFundamentalProvider:
         n_quarters: int = 8,
     ) -> FundamentalData:
         norm_ticker = normalize_ticker(ticker)
+        key = (norm_ticker, as_of)
+
+        if key in self._fundamentals_cache:
+            return self._fundamentals_cache[key]
+
         async with self._semaphore:
+            # Re-check inside semaphore in case another coroutine just populated it
+            if key in self._fundamentals_cache:
+                return self._fundamentals_cache[key]
+
             dart_task = asyncio.create_task(
                 self._dart.fetch_fundamentals(norm_ticker, as_of, n_quarters=n_quarters)
             )
@@ -75,7 +85,9 @@ class CompositeKrFundamentalProvider:
                     raise
                 return FundamentalData(ticker=norm_ticker)
 
-        return self._merge_fundamentals(dart_fundamentals, market_snapshot, price_snapshot)
+        result = self._merge_fundamentals(dart_fundamentals, market_snapshot, price_snapshot)
+        self._fundamentals_cache[key] = result
+        return result
 
     async def _fetch_market_snapshot(
         self, ticker: str, as_of: date
@@ -101,32 +113,13 @@ class CompositeKrFundamentalProvider:
         return {"last_close_price": bars[-1].close}
 
     def _fetch_market_snapshot_sync(self, ticker: str, as_of: date) -> dict[str, float | None]:
-        # Clamp to today so future decision dates (end-of-month) can still
-        # fetch the most recently available market data.
+        # Market-cap snapshots are month/day keyed already, so use the snapshot
+        # date directly instead of re-fetching per-ticker OHLCV to discover the
+        # last trading day. Last close is supplied by the price provider path.
         effective_as_of = min(as_of, date.today())
-        trade_date = latest_krx_trading_day(ticker, effective_as_of)
-        if trade_date is None:
-            return {
-                "last_close_price": None,
-                "market_cap": None,
-                "issued_shares": None,
-            }
-
-        start = trade_date - timedelta(days=1)
-        price_df, _source = fetch_stock_ohlcv_frame(
-            ticker,
-            start,
-            trade_date,
-        )
-        last_close: float | None = None
-        if price_df is not None and not price_df.empty:
-            row = price_df.iloc[-1]
-            close_val = row.get("종가", row.get("Close", 0)) or 0
-            last_close = float(close_val) if close_val else None
-
         market_cap = None
         issued_shares = None
-        frame = self._market_cap_frame(trade_date)
+        frame = self._market_cap_frame(effective_as_of)
         if frame is not None and ticker in frame.index:
             row = frame.loc[ticker]
             cap_val = row.get("시가총액", 0) or 0
@@ -135,7 +128,7 @@ class CompositeKrFundamentalProvider:
             issued_shares = float(shares_val) if shares_val else None
 
         return {
-            "last_close_price": last_close,
+            "last_close_price": None,
             "market_cap": market_cap,
             "issued_shares": issued_shares,
         }

@@ -294,18 +294,12 @@ def fetch_market_cap_frame(as_of: date, market: str) -> Any | None:
 
     Fallback order:
     1. Local daily cache (data/market/cap_daily/)
-    2. Local monthly cache (data/market/cap/)
-    3. FDR public StockListing (within 45 days)
-    4. pykrx KRX authenticated path
+    2. FDR public StockListing (within 45 days)
+    3. pykrx KRX authenticated path
     """
     local_frame = _load_local_market_cap_snapshot(as_of, market)
     if local_frame is not None and not local_frame.empty:
         return local_frame
-
-    monthly_frame = _load_local_monthly_cap_snapshot(as_of, market)
-    if monthly_frame is not None and not monthly_frame.empty:
-        logger.info("Using local monthly cap snapshot for %s as of %s", market, as_of)
-        return monthly_frame
 
     age_days = (date.today() - as_of).days
     if age_days > _PUBLIC_MARKET_CAP_MAX_AGE_DAYS:

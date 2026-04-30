@@ -62,6 +62,9 @@ scripts\windows_krx_setup_and_probe.cmd
 python scripts/crawl_kr_data_fallback.py --start 2025-01-01 --end 2026-03-12
 ```
 
+기본값은 public FDR `KOSPI-DESC`/`KOSDAQ-DESC` 전체 종목입니다. 35종목 pilot만 돌릴 때만
+`--universe-csv universes/kr_universe.csv`를 명시합니다.
+
 이 스크립트는 다음을 생성합니다:
 
 - `data/market/cap_daily/*.parquet`
@@ -135,6 +138,9 @@ python scripts/crawl_kr_data_fallback.py --start 2025-01-01 --end 2026-03-31
 python scripts/build_kr_snapshot.py --as-of 2025-12-31 --profile official --force
 ```
 
+The fallback crawler defaults to full public KOSPI/KOSDAQ listings. Pass
+`--universe-csv universes/kr_universe.csv` only for pilot-sized runs.
+
 Build US snapshot locally (requires `FRED_API_KEY`, `SEC_EDGAR_USER_AGENT`):
 
 ```bash
@@ -146,6 +152,13 @@ Or both together (KR + US):
 ```bash
 python scripts/run_daily_batch.py --as-of 2026-02-27
 ```
+
+For multi-year historical backfills, `scripts/backfill_all.py` caches 32 DART quarters per ticker by default
+(`--dart-quarters`) so early replay months have point-in-time financial statements.
+`./run_crawling.sh kr` and auto mode also run the public fallback crawler first when historical
+`data/market/cap_daily/` coverage is incomplete.
+Override `START_MONTH`/`END_MONTH` when the public source only covers a shorter range, e.g.
+`START_MONTH=2023-05 END_MONTH=2026-03 ./run_crawling.sh auto`.
 
 Output files are written under `artifacts/snapshots/YYYY-MM/`:
 

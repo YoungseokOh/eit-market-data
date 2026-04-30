@@ -18,7 +18,7 @@ import requests
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_ROOT = PROJECT_ROOT / "data"
-DEFAULT_UNIVERSE_CSV = PROJECT_ROOT / "universes/kr_universe.csv"
+DEFAULT_UNIVERSE_CSV: Path | None = None
 DEFAULT_START = "2024-01-01"
 DEFAULT_END = date.today().isoformat()
 
@@ -106,7 +106,7 @@ def _load_tickers(universe_csv: Path | None = None) -> list[TickerMeta]:
 
     frames = []
     for market in ("KOSPI", "KOSDAQ"):
-        frame = fdr.StockListing(market)
+        frame = fdr.StockListing(f"{market}-DESC")
         if frame is None or frame.empty:
             continue
         frame = frame.rename(columns={"Code": "ticker", "Name": "name", "Market": "market"})
@@ -396,6 +396,18 @@ def summarize_outputs(out_root: Path) -> None:
             print(f"  * {file} rows={len(pd.read_parquet(file))}")
 
 
+def missing_cap_daily_files(out_root: Path, month_ends: list[pd.Timestamp]) -> list[Path]:
+    out_dir = out_root / "market/cap_daily"
+    missing: list[Path] = []
+    for month_end in month_ends:
+        trade_date = month_end.strftime("%Y%m%d")
+        for market in ("KOSPI", "KOSDAQ"):
+            path = out_dir / f"{market}_{trade_date}.parquet"
+            if not path.exists():
+                missing.append(path)
+    return missing
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Backfill KR market-cap snapshots and related fallback datasets."
@@ -404,8 +416,11 @@ def main() -> None:
     parser.add_argument("--end", default=DEFAULT_END, help="End date (YYYY-MM-DD).")
     parser.add_argument(
         "--universe-csv",
-        default=str(DEFAULT_UNIVERSE_CSV),
-        help="Universe CSV path. If missing, falls back to public KOSPI/KOSDAQ listings.",
+        default="",
+        help=(
+            "Optional universe CSV path. Defaults to public full KOSPI/KOSDAQ listings; "
+            "pass universes/kr_universe.csv only for pilot runs."
+        ),
     )
     parser.add_argument(
         "--output-root",
@@ -448,6 +463,15 @@ def main() -> None:
     if not args.skip_sector:
         collect_sector(end, out_root)
     summarize_outputs(out_root)
+    missing_cap = missing_cap_daily_files(out_root, month_ends)
+    if missing_cap:
+        print(
+            f"[ERROR] cap_daily coverage incomplete: missing {len(missing_cap)} "
+            f"of {len(month_ends) * 2} expected market/month files"
+        )
+        for path in missing_cap[:10]:
+            print(f"  * missing {path}")
+        raise SystemExit(2)
 
 
 if __name__ == "__main__":

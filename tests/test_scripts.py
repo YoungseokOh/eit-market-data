@@ -286,6 +286,57 @@ def test_crawl_kr_data_fallback_saves_daily_cap_grouped_files(
     assert set(frame.columns) >= {"종목코드", "시가총액", "상장주식수", "source_trade_date"}
 
 
+def test_crawl_kr_data_fallback_default_uses_full_public_listings() -> None:
+    module = _load_module(
+        Path("scripts/crawl_kr_data_fallback.py"),
+        "crawl_kr_data_fallback_full_listing_test",
+    )
+
+    class DummyFdr:
+        @staticmethod
+        def StockListing(market):  # noqa: N802
+            frames = {
+                "KOSPI-DESC": pd.DataFrame(
+                    {
+                        "Code": ["005930"],
+                        "Name": ["삼성전자"],
+                        "Market": ["KOSPI"],
+                    }
+                ),
+                "KOSDAQ-DESC": pd.DataFrame(
+                    {
+                        "Code": ["000250"],
+                        "Name": ["삼천당제약"],
+                        "Market": ["KOSDAQ"],
+                    }
+                ),
+            }
+            return frames[market]
+
+    module.fdr = DummyFdr
+
+    tickers = module._load_tickers(None)
+
+    assert [(item.ticker, item.market) for item in tickers] == [
+        ("000250", "KOSDAQ"),
+        ("005930", "KOSPI"),
+    ]
+
+
+def test_crawl_kr_data_fallback_reports_missing_cap_daily_files(tmp_path: Path) -> None:
+    module = _load_module(
+        Path("scripts/crawl_kr_data_fallback.py"),
+        "crawl_kr_data_fallback_missing_cap_test",
+    )
+    month_ends = [pd.Timestamp("2022-01-28")]
+    (tmp_path / "market/cap_daily").mkdir(parents=True)
+    (tmp_path / "market/cap_daily/KOSPI_20220128.parquet").write_text("stub")
+
+    missing = module.missing_cap_daily_files(tmp_path, month_ends)
+
+    assert missing == [tmp_path / "market/cap_daily/KOSDAQ_20220128.parquet"]
+
+
 def test_build_us_snapshot_supports_external_artifacts_root(monkeypatch, tmp_path: Path) -> None:
     module = _load_module(
         Path("scripts/build_us_snapshot.py"),

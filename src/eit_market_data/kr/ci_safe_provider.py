@@ -28,22 +28,39 @@ class FdrNaverPriceProvider:
     """Fetch Korean stock prices via FinanceDataReader's NAVER route."""
 
     def __init__(self) -> None:
-        self._semaphore = asyncio.Semaphore(4)
+        self._semaphore = asyncio.Semaphore(16)
+        # Per-instance cache keyed by (ticker, as_of).
+        # NAVER sise.nhn always returns count=6000 bars regardless of start date,
+        # so we store the full history once and slice on return.
+        self._cache: dict[tuple[str, date], list[PriceBar]] = {}
 
     async def fetch_prices(
         self, ticker: str, as_of: date, lookback_days: int = 300
     ) -> list[PriceBar]:
         norm_ticker = normalize_ticker(ticker)
+        key = (norm_ticker, as_of)
+
+        # Fast path: already cached — no semaphore needed
+        if key in self._cache:
+            return self._cache[key][-lookback_days:]
+
         async with self._semaphore:
+            # Re-check inside semaphore (another coroutine may have populated it)
+            if key in self._cache:
+                return self._cache[key][-lookback_days:]
             try:
-                return await asyncio.to_thread(
+                # Fetch complete history so all subsequent callers get cache hits
+                all_bars = await asyncio.to_thread(
                     self._fetch_prices_sync,
                     norm_ticker,
                     as_of,
-                    lookback_days,
+                    6000,
                 )
+                self._cache[key] = all_bars
+                return all_bars[-lookback_days:]
             except Exception as exc:
                 logger.warning("FDR NAVER price fetch failed for %s: %s", norm_ticker, exc)
+                self._cache[key] = []
                 return []
 
     def _fetch_prices_sync(

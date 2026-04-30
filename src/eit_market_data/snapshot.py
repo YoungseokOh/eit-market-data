@@ -234,24 +234,44 @@ class SnapshotBuilder:
         execution_date = _first_business_day(ny, nm)
 
         # Throttle concurrent API calls to avoid rate limits
-        sem = asyncio.Semaphore(8)
+        sem = asyncio.Semaphore(32)
+        completed = 0
+        total = len(universe) * 3
 
-        async def _limited(coro):
+        async def _limited(coro, label: str = ""):
+            nonlocal completed
             async with sem:
-                return await coro
+                result = await coro
+            completed += 1
+            if completed % 500 == 0 or completed == total:
+                logger.info(
+                    "  [build %s] %d/%d stock tasks done (%.0f%%)",
+                    month, completed, total, completed / total * 100,
+                )
+            return result
 
         # Fetch all data with concurrency limit
-        price_tasks = {t: _limited(self.price.fetch_prices(t, decision_date)) for t in universe}
-        fund_tasks = {t: _limited(self.fundamental.fetch_fundamentals(t, decision_date)) for t in universe}
-        filing_tasks = {t: _limited(self.filing.fetch_filing(t, decision_date)) for t in universe}
+        price_tasks = {t: _limited(self.price.fetch_prices(t, decision_date), "price") for t in universe}
+        fund_tasks = {t: _limited(self.fundamental.fetch_fundamentals(t, decision_date), "fund") for t in universe}
+        filing_tasks = {t: _limited(self.filing.fetch_filing(t, decision_date), "filing") for t in universe}
         macro_task = self.macro.fetch_macro(decision_date)
         sector_map_task = self.sector.fetch_sector_map(universe, as_of=decision_date)
         benchmark_task = self.benchmark.fetch_benchmark(decision_date)
 
-        # Gather all per-stock data
-        all_prices = await asyncio.gather(*price_tasks.values())
-        all_funds = await asyncio.gather(*fund_tasks.values())
-        all_filings = await asyncio.gather(*filing_tasks.values())
+        # Gather price / fundamental / filing all in parallel.
+        # FdrNaverPriceProvider caches by (ticker, as_of), so fund_tasks and
+        # sector_avg_tasks that also call fetch_prices() get cache hits instead
+        # of duplicate NAVER HTTP requests.
+        n = len(universe)
+        all_stock_results = await asyncio.gather(
+            *price_tasks.values(),
+            *fund_tasks.values(),
+            *filing_tasks.values(),
+        )
+        all_prices = list(all_stock_results[:n])
+        all_funds = list(all_stock_results[n : 2 * n])
+        all_filings = list(all_stock_results[2 * n :])
+
         macro, sector_map, benchmark_prices = await asyncio.gather(
             macro_task, sector_map_task, benchmark_task
         )

@@ -30,7 +30,7 @@ def test_create_kr_providers_ci_safe_uses_seed_sector(tmp_path: Path, monkeypatc
 
     assert type(providers["price_provider"]).__name__ == "FdrNaverPriceProvider"
     assert type(providers["sector_provider"]).__name__ == "SeedSectorProvider"
-    assert type(providers["benchmark_provider"]).__name__ == "NullBenchmarkProvider"
+    assert type(providers["benchmark_provider"]).__name__ == "FdrBenchmarkProvider"
 
 
 def test_create_kr_providers_official_falls_back_without_dart_and_ecos(monkeypatch) -> None:

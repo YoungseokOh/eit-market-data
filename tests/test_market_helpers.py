@@ -88,7 +88,7 @@ def test_fetch_index_ohlcv_frame_uses_public_symbol_mapping(monkeypatch) -> None
 
     assert source == "fdr"
     assert result is not None and not result.empty
-    assert calls == ["KS11"]
+    assert calls == ["^KS11"]
 
 
 def test_fetch_market_cap_frame_raises_on_unexpected_columns(monkeypatch) -> None:
@@ -108,7 +108,7 @@ def test_fetch_market_cap_frame_raises_on_unexpected_columns(monkeypatch) -> Non
     )
 
     try:
-        fetch_market_cap_frame(date(2026, 3, 6), "KOSPI")
+        fetch_market_cap_frame(date.today(), "KOSPI")
     except RuntimeError as exc:
         assert "unexpected columns" in str(exc)
     else:
@@ -165,7 +165,11 @@ def test_fetch_market_cap_frame_uses_previous_local_trading_day(tmp_path, monkey
     assert int(result.loc["005930", "종가"]) == 70200
 
 
-def test_fetch_market_cap_frame_returns_none_for_old_dates_without_local_snapshot(monkeypatch) -> None:
+def test_fetch_market_cap_frame_returns_none_for_old_dates_without_local_snapshot(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr("eit_market_data.kr.market_helpers.CAP_DAILY_DIR", tmp_path)
     monkeypatch.setattr(
         "eit_market_data.kr.market_helpers._load_fdr",
         lambda: (_ for _ in ()).throw(AssertionError("should not load fdr")),
