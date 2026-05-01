@@ -5,7 +5,7 @@ Phases:
   1. KR Raw pykrx  — 전종목 OHLCV, cap, fundamental, investor, shorting, foreign, index, etf, meta
   2. KR DART 재무   — 전종목 분기 재무제표 (opendartreader, 5s delay)
   3. KR Snapshots   — 월별 MonthlySnapshot JSON (ci_safe profile)
-  4. US Snapshots   — S&P 500 월별 MonthlySnapshot JSON
+  4. US Snapshots   — S&P 500 + Nasdaq-100 월별 MonthlySnapshot JSON
 
 Usage:
     python scripts/backfill_all.py --start 2022-01 --end 2026-03
@@ -29,7 +29,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from datetime import date, timedelta
 from io import StringIO
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from tqdm import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
@@ -204,6 +204,7 @@ KR_MIN_FIELD_COVERAGE_RATIO = 0.50
 
 KR_UNIVERSE_CSV = PROJECT_ROOT / "universes" / "kr_universe.csv"
 SP500_CSV = PROJECT_ROOT / "universes" / "sp500.csv"
+NDX_100_URL = "https://en.wikipedia.org/wiki/Nasdaq-100"
 
 BACKFILL_ROOT = PROJECT_ROOT / "data" / "backfill"
 ARTIFACTS_ROOT = PROJECT_ROOT / "artifacts"
@@ -360,7 +361,88 @@ def _pykrx_call(
 def _load_csv_tickers(path: Path) -> list[str]:
     with path.open(newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
-        return [row["ticker"].strip() for row in reader if row.get("ticker")]
+        return [
+            str(row["ticker"]).strip().upper().replace(".", "-")
+            for row in reader
+            if row.get("ticker")
+        ]
+
+
+def _merge_universe(sp500: Sequence[str], ndx: Sequence[str]) -> list[str]:
+    universe: list[str] = []
+    seen: set[str] = set()
+    for ticker in [*sp500, *ndx]:
+        if ticker in seen:
+            continue
+        seen.add(ticker)
+        universe.append(ticker)
+    return universe
+
+
+def _pick_nasdaq100_tickers(tables: list[Any]) -> list[str]:
+    import pandas as pd
+
+    for table in tables:
+        df = table if isinstance(table, pd.DataFrame) else None
+        if df is None:
+            continue
+        cols = [str(c).lower() for c in df.columns]
+        if "ticker" not in cols:
+            continue
+        if not (("company" in cols) or ("security" in cols)):
+            continue
+        if len(df) < 90:
+            continue
+        ticker_col = next(c for c in df.columns if str(c).lower() == "ticker")
+        parsed = [
+            str(v).strip().replace(".", "-").upper()
+            for v in df[ticker_col].tolist()
+            if str(v).strip() not in {"", "Ticker"}
+        ]
+        if len(parsed) >= 90:
+            return parsed
+    raise RuntimeError("Unable to locate Nasdaq-100 table from Wikipedia output")
+
+
+def _resolve_nasdaq100_tickers() -> list[str]:
+    import urllib.request
+
+    import pandas as pd
+
+    req = urllib.request.Request(
+        NDX_100_URL,
+        headers={"User-Agent": "Mozilla/5.0"},
+    )
+    with urllib.request.urlopen(req, timeout=30) as response:
+        html = response.read().decode("utf-8", errors="ignore")
+    tables = pd.read_html(StringIO(html))
+    ndx = _pick_nasdaq100_tickers(tables)
+    logger.info("Loaded %d Nasdaq-100 tickers from Wikipedia", len(ndx))
+    return ndx
+
+
+def _resolve_default_us_universe() -> tuple[list[str], dict[str, int], Path]:
+    """Load S&P 500 + Nasdaq-100 default US snapshot universe."""
+    sp500_path = _ensure_sp500_csv(SP500_CSV)
+    sp500 = _load_csv_tickers(sp500_path)
+    try:
+        ndx = _resolve_nasdaq100_tickers()
+    except Exception as exc:
+        logger.warning("Nasdaq-100 fetch failed, falling back to S&P 500 only: %s", exc)
+        ndx = []
+    merged = _merge_universe(sp500, ndx)
+    sp_set = set(sp500)
+    ndx_set = set(ndx)
+    return (
+        merged,
+        {
+            "sp500": len(sp_set),
+            "ndx": len(ndx_set),
+            "overlap": len(sp_set & ndx_set),
+            "merged": len(merged),
+        },
+        sp500_path,
+    )
 
 
 def _fdr_all_kr_tickers() -> list[str]:
@@ -542,7 +624,7 @@ def _raise_for_incomplete_kr_snapshot(field_coverage: dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# S&P 500 universe management
+# US universe management (S&P 500 + Nasdaq-100)
 # ---------------------------------------------------------------------------
 
 _FALLBACK_SP500 = [
@@ -1158,7 +1240,7 @@ async def phase3_kr_snapshots(
 
 
 # ---------------------------------------------------------------------------
-# Phase 4: US Monthly Snapshots (S&P 500)
+# Phase 4: US Monthly Snapshots (S&P 500 + Nasdaq-100)
 # ---------------------------------------------------------------------------
 
 
@@ -1167,13 +1249,18 @@ async def phase4_us_snapshots(
     end_month: str,
     artifacts_root: Path,
 ) -> None:
-    """Build US monthly snapshots for S&P 500."""
+    """Build US monthly snapshots for S&P 500 + Nasdaq-100."""
     from eit_market_data.snapshot import SnapshotBuilder, SnapshotConfig, create_real_providers
 
-    # Ensure S&P 500 universe
-    sp500_path = _ensure_sp500_csv(SP500_CSV)
-    tickers = _load_csv_tickers(sp500_path)
-    logger.info("[Phase 4] US universe: %d tickers from %s", len(tickers), sp500_path)
+    tickers, stats, sp500_path = _resolve_default_us_universe()
+    logger.info(
+        "[Phase 4] US universe: sp500=%d, ndx=%d, overlap=%d, merged=%d (from %s + Wikipedia)",
+        stats["sp500"],
+        stats["ndx"],
+        stats["overlap"],
+        stats["merged"],
+        sp500_path,
+    )
 
     months = _month_range(start_month, end_month)
     today = date.today()
@@ -1360,7 +1447,7 @@ Examples:
   # Only US snapshots
   python scripts/backfill_all.py --start 2022-01 --end 2026-03 --phase 4
 
-  # Refresh S&P 500 universe from Wikipedia
+  # Refresh S&P 500 universe from Wikipedia (used by default US merged universe)
   python scripts/backfill_all.py --refresh-sp500
 """,
     )
@@ -1371,7 +1458,7 @@ Examples:
         type=int,
         nargs="+",
         default=[1, 2, 3, 4],
-        help="Phases to run (default: all). 1=pykrx, 2=DART, 3=KR snapshots, 4=US snapshots",
+        help="Phases to run (default: all). 1=pykrx, 2=DART, 3=KR snapshots, 4=US snapshots (S&P 500 + Nasdaq-100)",
     )
     parser.add_argument(
         "--dart-delay",

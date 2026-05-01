@@ -415,6 +415,12 @@ python ../eit-market-data/scripts/run_daily_batch.py \
   --us-universe AAPL,MSFT,GOOGL,AMZN,NVDA
 ```
 
+For full historical US backfill in default mode (S&P 500 + Nasdaq-100), run:
+
+```bash
+python ../eit-market-data/scripts/build_us_batch.py --year 2025 --chunk-size 120
+```
+
 ---
 
 See [smoke-test-results.md](smoke-test-results.md) for verification details.

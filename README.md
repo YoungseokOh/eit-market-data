@@ -179,6 +179,12 @@ Build US snapshot locally (requires `FRED_API_KEY`, `SEC_EDGAR_USER_AGENT`):
 python scripts/build_us_snapshot.py --as-of 2026-02-27 --universe AAPL,MSFT,GOOGL
 ```
 
+For historical full-US backfills, use the default merged universe (S&P 500 + Nasdaq-100):
+
+```bash
+python scripts/build_us_batch.py --year 2025 --chunk-size 120
+```
+
 Or both together (KR + US):
 
 ```bash
@@ -187,6 +193,7 @@ python scripts/run_daily_batch.py --as-of 2026-02-27
 
 For multi-year historical backfills, `scripts/backfill_all.py` caches 32 DART quarters per ticker by default
 (`--dart-quarters`) so early replay months have point-in-time financial statements.
+Its Phase 4 US backfill default universe is S&P 500 + Nasdaq-100 (merged).
 `./run_crawling.sh kr` and auto mode also run the pykrx crawler first when historical
 `data/market/cap_daily/` coverage is incomplete.
 Override `START_MONTH`/`END_MONTH` to bound long-range replay runs, e.g.
