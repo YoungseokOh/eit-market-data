@@ -191,11 +191,15 @@ pip install -e '.[dev]'
 | `DART_API_KEY` | DART Open API 키 | `DartProvider` |
 | `ECOS_API_KEY` | 한국은행 ECOS API 키 | `EcosMacroProvider` |
 
-### Claude Code 스킬
+### Claude / Codex 스킬
 
-이 프로젝트의 Claude Code 스킬은 `.claude/skills/`에 버전관리된다 (프로젝트 전용).
+이 프로젝트의 공용 작업 지침은 `.claude/skills/`에 버전관리되고,
+Codex 스캔 경로와 맞추기 위해 `.agents/skills`를 `.claude/skills`와 연결해 두었다.
 
 | 스킬 | 위치 | 용도 |
 |------|------|------|
-| `market-data-preflight` | `.claude/skills/market-data-preflight/SKILL.md` | 데이터 수집 전 환경/API/거래일 5단계 점검 |
-| `point-in-time-guardrails` | `.claude/skills/point-in-time-guardrails/SKILL.md` | look-ahead bias 방지 체크 |
+| `market-data-preflight` | `.agents/skills/market-data-preflight/SKILL.md` | 데이터 수집 전 환경/API/거래일 5단계 점검 |
+| `point-in-time-guardrails` | `.agents/skills/point-in-time-guardrails/SKILL.md` | look-ahead bias 방지 체크 |
+| `kr-bundle-pipeline` | `.agents/skills/kr-bundle-pipeline/SKILL.md` | KR 월별 스냅샷 파이프라인 점검 |
+| `krx-auth-recovery` | `.agents/skills/krx-auth-recovery/SKILL.md` | KRX auth/session 복구/재시도 플로우 |
+| `provider-maintenance` | `.agents/skills/provider-maintenance/SKILL.md` | Provider 변경/확장 점검 |

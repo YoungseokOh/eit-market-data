@@ -2,6 +2,9 @@
 
 This repository keeps Claude-specific project instructions under `.claude/`.
 
+To keep Codex discovery working, this repository also exposes skills at `.agents/skills`
+as a symlink to `.claude/skills`.
+
 ## Repository Focus
 
 `eit-market-data` is a standalone point-in-time market data layer for EIT.
@@ -9,6 +12,8 @@ This repository keeps Claude-specific project instructions under `.claude/`.
 - Runtime code lives under `src/eit_market_data/`
 - Operational scripts live under `scripts/`
 - Reusable project skills live under `.claude/skills/`
+  - `.agents/skills` is a repository-level Codex entry point and is kept as a
+    symlink to `.claude/skills/`.
 - Reusable project rules live under `.claude/rules/`
 
 ## Local Standards
