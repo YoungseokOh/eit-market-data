@@ -624,7 +624,9 @@ def _create_fallback_sp500(path: Path) -> None:
 def phase1_kr_pykrx(start_month: str, end_month: str, out: Path) -> None:
     """Fetch all pykrx raw data with resume/skip support."""
     try:
-        from pykrx import stock
+        from eit_market_data.kr.pykrx_loader import load_pykrx_stock
+
+        stock = load_pykrx_stock()
     except ImportError:
         logger.error("pykrx not installed. Run: pip install -e '.[kr]'")
         return
@@ -664,8 +666,8 @@ def phase1_kr_pykrx(start_month: str, end_month: str, out: Path) -> None:
     phase1_summary = _Phase1Summary()
 
     # --- 1a. OHLCV per ticker (full range, skip existing) ---
-    # Use market_helpers.fetch_market_ticker_list (FDR first, pykrx fallback)
-    # Use market_helpers.fetch_stock_ohlcv_frame (FDR) for per-ticker OHLCV
+    # Use market_helpers.fetch_market_ticker_list (pykrx first, FDR fallback)
+    # Use market_helpers.fetch_stock_ohlcv_frame with fallback where needed for per-ticker OHLCV
     logger.info("[Phase 1] === OHLCV (full range) ===")
 
     import FinanceDataReader as fdr
@@ -920,7 +922,9 @@ def phase2_kr_dart(
 ) -> None:
     """Fetch DART financials for all KR tickers with resume support."""
     try:
-        from pykrx import stock
+        from eit_market_data.kr.pykrx_loader import load_pykrx_stock
+
+        stock = load_pykrx_stock()
     except ImportError:
         raise RuntimeError("pykrx not installed (needed for ticker list)")
 
@@ -1074,65 +1078,80 @@ async def phase3_kr_snapshots(
     backfill_dart = BackfillDartProvider(BACKFILL_ROOT / "dart")
     phase_start = time.time()
 
-    for idx, month_str in enumerate(todo_months, 1):
-        month_t0 = time.time()
-        logger.info(
-            "[Phase 3] ▶ START %s (%d/%d, overall %d/%d)",
-            month_str, idx, len(todo_months), skip_n + idx, len(snapshot_months),
-        )
-
-        try:
-            builder = SnapshotBuilder(
-                **create_kr_providers(
-                    profile=profile,
-                    universe_csv=KR_UNIVERSE_CSV,
-                    dart_override=backfill_dart,
-                )
-            )
-            config = SnapshotConfig(artifacts_dir=str(artifacts_root / "kr"))
-
-            # Suppress FDR "invalid symbol" print spam
-            with _suppress_stdout():
-                snapshot = await builder.build_and_persist(month_str, full_tickers, config)
-
-            snapshot_dir = Path(config.artifacts_dir) / "snapshots" / month_str
-            field_coverage = _snapshot_field_coverage(snapshot)
-            _raise_for_incomplete_kr_snapshot(field_coverage)
-            _write_snapshot_manifest(
-                snapshot_dir,
-                market="kr",
-                month=month_str,
-                snapshot=snapshot,
-                source_profile=profile,
-                field_coverage=field_coverage,
-            )
-            summary = {
-                "status": "ok",
-                "month": month_str,
-                "market": "kr",
-                "universe_size": len(snapshot.universe),
-                "price_tickers": len(snapshot.prices),
-                "fundamental_tickers": len(snapshot.fundamentals),
-                "field_coverage": field_coverage,
-                "profile": profile,
-            }
-            (snapshot_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
-            elapsed_m = time.time() - month_t0
+    with tqdm(
+        total=len(todo_months),
+        desc="[Phase 3] KR snapshots",
+        unit="month",
+        ncols=110,
+        dynamic_ncols=True,
+    ) as pbar:
+        for idx, month_str in enumerate(todo_months, 1):
+            month_t0 = time.time()
             logger.info(
-                "[Phase 3] ✅ DONE  %s — %dp/%df in %.0fs (%.1f min)",
-                month_str, len(snapshot.prices), len(snapshot.fundamentals),
-                elapsed_m, elapsed_m / 60,
+                "[Phase 3] ▶ START %s (%d/%d, overall %d/%d)",
+                month_str, idx, len(todo_months), skip_n + idx, len(snapshot_months),
             )
+            pbar.set_postfix({"month": month_str, "done": f"{skip_n + idx}/{len(snapshot_months)}", "status": "running"})
 
-        except Exception as exc:
-            elapsed_m = time.time() - month_t0
-            logger.error("[Phase 3] ❌ FAIL  %s after %.0fs: %s", month_str, elapsed_m, exc)
-            snap_dir = artifacts_root / "kr" / "snapshots" / month_str
-            snap_dir.mkdir(parents=True, exist_ok=True)
-            (snap_dir / "summary.json").write_text(
-                json.dumps({"status": "failed", "month": month_str, "error": str(exc)}, indent=2),
-                encoding="utf-8",
-            )
+            try:
+                builder = SnapshotBuilder(
+                    **create_kr_providers(
+                        profile=profile,
+                        universe_csv=KR_UNIVERSE_CSV,
+                        dart_override=backfill_dart,
+                    )
+                )
+                config = SnapshotConfig(artifacts_dir=str(artifacts_root / "kr"))
+
+                # Suppress FDR "invalid symbol" print spam
+                with _suppress_stdout():
+                    snapshot = await builder.build_and_persist(month_str, full_tickers, config)
+
+                snapshot_dir = Path(config.artifacts_dir) / "snapshots" / month_str
+                field_coverage = _snapshot_field_coverage(snapshot)
+                _raise_for_incomplete_kr_snapshot(field_coverage)
+                _write_snapshot_manifest(
+                    snapshot_dir,
+                    market="kr",
+                    month=month_str,
+                    snapshot=snapshot,
+                    source_profile=profile,
+                    field_coverage=field_coverage,
+                )
+                summary = {
+                    "status": "ok",
+                    "month": month_str,
+                    "market": "kr",
+                    "universe_size": len(snapshot.universe),
+                    "price_tickers": len(snapshot.prices),
+                    "fundamental_tickers": len(snapshot.fundamentals),
+                    "field_coverage": field_coverage,
+                    "profile": profile,
+                }
+                (snapshot_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+                elapsed_m = time.time() - month_t0
+                logger.info(
+                    "[Phase 3] ✅ DONE  %s — %dp/%df in %.0fs (%.1f min)",
+                    month_str, len(snapshot.prices), len(snapshot.fundamentals),
+                    elapsed_m, elapsed_m / 60,
+                )
+                pbar.set_postfix({
+                    "month": month_str,
+                    "status": "ok",
+                    "prices": len(snapshot.prices),
+                })
+            except Exception as exc:
+                elapsed_m = time.time() - month_t0
+                logger.error("[Phase 3] ❌ FAIL  %s after %.0fs: %s", month_str, elapsed_m, exc)
+                snap_dir = artifacts_root / "kr" / "snapshots" / month_str
+                snap_dir.mkdir(parents=True, exist_ok=True)
+                (snap_dir / "summary.json").write_text(
+                    json.dumps({"status": "failed", "month": month_str, "error": str(exc)}, indent=2),
+                    encoding="utf-8",
+                )
+                pbar.set_postfix({"month": month_str, "status": "fail"})
+            finally:
+                pbar.update(1)
 
     phase_elapsed = time.time() - phase_start
     logger.info("[Phase 3] All done — %d months in %.1f min.", len(todo_months), phase_elapsed / 60)
@@ -1180,65 +1199,80 @@ async def phase4_us_snapshots(
     )
     phase_start = time.time()
 
-    for idx, month_str in enumerate(todo_months, 1):
-        month_t0 = time.time()
-        logger.info(
-            "[Phase 4] ▶ START %s (%d/%d, overall %d/%d)",
-            month_str, idx, len(todo_months), skip_n + idx, len(snapshot_months),
-        )
-
-        try:
-            providers = create_real_providers()
-            builder = SnapshotBuilder(**providers)
-            config = SnapshotConfig(artifacts_dir=str(artifacts_root / "us"))
-
-            with _suppress_stdout():
-                snapshot = await builder.build_and_persist(month_str, tickers, config)
-
-            out_dir = Path(config.artifacts_dir) / "snapshots" / month_str
-            field_coverage = _snapshot_field_coverage(snapshot)
-            _write_snapshot_manifest(
-                out_dir,
-                market="us",
-                month=month_str,
-                snapshot=snapshot,
-                source_profile="real",
-                field_coverage=field_coverage,
-            )
-            (out_dir / "metadata.json").write_text(
-                json.dumps({
-                    "version": "1.0", "market": "us",
-                    "decision_date": str(snapshot.decision_date),
-                    "execution_date": str(snapshot.execution_date),
-                    "universe": snapshot.universe,
-                    "providers": ["YFinanceProvider", "FredMacroProvider", "EdgarFilingProvider"],
-                }, indent=2, sort_keys=True), encoding="utf-8",
-            )
-            (out_dir / "summary.json").write_text(
-                json.dumps({
-                    "status": "ok", "month": month_str, "market": "us",
-                    "universe_size": len(snapshot.universe),
-                    "price_tickers": len(snapshot.prices),
-                    "fundamental_tickers": len(snapshot.fundamentals),
-                    "field_coverage": field_coverage,
-                }, indent=2), encoding="utf-8",
-            )
-            elapsed_m = time.time() - month_t0
+    with tqdm(
+        total=len(todo_months),
+        desc="[Phase 4] US snapshots",
+        unit="month",
+        ncols=110,
+        dynamic_ncols=True,
+    ) as pbar:
+        for idx, month_str in enumerate(todo_months, 1):
+            month_t0 = time.time()
             logger.info(
-                "[Phase 4] ✅ DONE  %s — %dp/%df in %.0fs (%.1f min)",
-                month_str, len(snapshot.prices), len(snapshot.fundamentals),
-                elapsed_m, elapsed_m / 60,
+                "[Phase 4] ▶ START %s (%d/%d, overall %d/%d)",
+                month_str, idx, len(todo_months), skip_n + idx, len(snapshot_months),
             )
+            pbar.set_postfix({"month": month_str, "done": f"{skip_n + idx}/{len(snapshot_months)}", "status": "running"})
 
-        except Exception as exc:
-            elapsed_m = time.time() - month_t0
-            logger.error("[Phase 4] ❌ FAIL  %s after %.0fs: %s", month_str, elapsed_m, exc)
-            snap_dir = artifacts_root / "us" / "snapshots" / month_str
-            snap_dir.mkdir(parents=True, exist_ok=True)
-            (snap_dir / "summary.json").write_text(
-                json.dumps({"status": "failed", "month": month_str, "error": str(exc)}, indent=2),
-                encoding="utf-8",
-            )
+            try:
+                providers = create_real_providers()
+                builder = SnapshotBuilder(**providers)
+                config = SnapshotConfig(artifacts_dir=str(artifacts_root / "us"))
+
+                with _suppress_stdout():
+                    snapshot = await builder.build_and_persist(month_str, tickers, config)
+
+                out_dir = Path(config.artifacts_dir) / "snapshots" / month_str
+                field_coverage = _snapshot_field_coverage(snapshot)
+                _write_snapshot_manifest(
+                    out_dir,
+                    market="us",
+                    month=month_str,
+                    snapshot=snapshot,
+                    source_profile="real",
+                    field_coverage=field_coverage,
+                )
+                (out_dir / "metadata.json").write_text(
+                    json.dumps({
+                        "version": "1.0", "market": "us",
+                        "decision_date": str(snapshot.decision_date),
+                        "execution_date": str(snapshot.execution_date),
+                        "universe": snapshot.universe,
+                        "providers": ["YFinanceProvider", "FredMacroProvider", "EdgarFilingProvider"],
+                    }, indent=2, sort_keys=True), encoding="utf-8",
+                )
+                (out_dir / "summary.json").write_text(
+                    json.dumps({
+                        "status": "ok", "month": month_str, "market": "us",
+                        "universe_size": len(snapshot.universe),
+                        "price_tickers": len(snapshot.prices),
+                        "fundamental_tickers": len(snapshot.fundamentals),
+                        "field_coverage": field_coverage,
+                    }, indent=2), encoding="utf-8",
+                )
+                elapsed_m = time.time() - month_t0
+                logger.info(
+                    "[Phase 4] ✅ DONE  %s — %dp/%df in %.0fs (%.1f min)",
+                    month_str, len(snapshot.prices), len(snapshot.fundamentals),
+                    elapsed_m, elapsed_m / 60,
+                )
+                pbar.set_postfix({
+                    "month": month_str,
+                    "status": "ok",
+                    "prices": len(snapshot.prices),
+                })
+            except Exception as exc:
+                elapsed_m = time.time() - month_t0
+                logger.error("[Phase 4] ❌ FAIL  %s after %.0fs: %s", month_str, elapsed_m, exc)
+                snap_dir = artifacts_root / "us" / "snapshots" / month_str
+                snap_dir.mkdir(parents=True, exist_ok=True)
+                (snap_dir / "summary.json").write_text(
+                    json.dumps({"status": "failed", "month": month_str, "error": str(exc)}, indent=2),
+                    encoding="utf-8",
+                )
+                pbar.set_postfix({"month": month_str, "status": "fail"})
+            finally:
+                pbar.update(1)
 
     phase_elapsed = time.time() - phase_start
     logger.info("[Phase 4] All done — %d months in %.1f min.", len(todo_months), phase_elapsed / 60)

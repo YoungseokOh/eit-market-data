@@ -16,8 +16,10 @@ pip install -e '.[all,dev]'
 
 ## KR Preflight
 
-기본 KR 경로는 FinanceDataReader 0.9.110의 공개 API를 사용하므로
-브라우저 로그인이나 KRX 쿠키가 필요하지 않습니다.
+KR 공식 스냅샷 빌드는 `official` 프로필 기준으로 pykrx(공식 KRX 경로)에서
+가격/마켓/섹터/벤치마크를 우선 조회합니다.  
+재무는 DART, 매크로는 ECOS에서 보강되며, FDR(`FinanceDataReader`)은
+정상 경로가 아니라 주로 진단·비상 대체/CI-safe 경로로 사용됩니다.
 
 preflight를 실행합니다:
 
@@ -28,11 +30,12 @@ python scripts/preflight_kr_data.py --as-of 2026-03-06 --ticker 005930
 This checks:
 - WSL2 detection and `/etc/resolv.conf`
 - DNS resolution for KRX/Naver/ECOS
-- public FDR KR price, listing, market-cap, benchmark, and sector lookup
+- KR 공개/공인 경로 health-check checks (가격/티커/마켓캡/지수/섹터)
 - DART fundamentals
 - ECOS macro coverage
 
-KRX 로그인 관련 스크립트는 기본 런타임이 아니라 수동 진단/실험용으로만 남아 있습니다:
+KRX 로그인 관련 스크립트(`scripts/krx_login.py`, `scripts/probe_fdr_krx_session.py`)는
+기본 런타임이 아니라 수동 진단/실험용으로만 남아 있습니다:
 
 ```bash
 python scripts/krx_login.py
@@ -56,14 +59,20 @@ Windows에서 이 repo를 직접 열어 로그인과 probe를 한 번에 실행�
 scripts\windows_krx_setup_and_probe.cmd
 ```
 
-히스토리컬 KR `market_cap` backfill이 필요하면 다음 스크립트를 사용합니다:
+히스토리컬 KR raw backfill이 필요하면 기본적으로 공식 경로(pykrx)를 우선 사용합니다.
+필요할 때만 FnGuide 레거시 경로를 병행합니다.
 
 ```bash
+# 기본 수집(권장)
+python scripts/crawl_kr_data_pykrx.py --start 2025-01-01 --end 2026-03-12 --output-root data
+
+# 보완용(필요 시)
 python scripts/crawl_kr_data_fallback.py --start 2025-01-01 --end 2026-03-12
 ```
 
-기본값은 public FDR `KOSPI-DESC`/`KOSDAQ-DESC` 전체 종목입니다. 35종목 pilot만 돌릴 때만
-`--universe-csv universes/kr_universe.csv`를 명시합니다.
+`crawl_kr_data_pykrx.py`는 공식 경로 재현/정규 수집 경로이고,  
+`crawl_kr_data_fallback.py`는 FnGuide 기반 legacy 보완 경로입니다.
+`scripts/crawl_kr_data.py`는 인증 기반 복구/디버깅 경로로만 유지됩니다.
 
 이 스크립트는 다음을 생성합니다:
 
@@ -72,7 +81,9 @@ python scripts/crawl_kr_data_fallback.py --start 2025-01-01 --end 2026-03-12
 - `data/index/ohlcv/*.parquet`
 - `data/market/sector/*.parquet`
 
-45일보다 오래된 월말 snapshot을 재현할 때는 `cap_daily` backfill이 먼저 있어야 합니다.
+월말 snapshot 재현은 먼저 `data/market/cap_daily/`를 같은 월말 거래일 기준으로 채웁니다.
+`scripts/fill_kr_cap_daily_gap.py`는 보조 보정 경로이며, 권장 경로는
+`crawl_kr_data_pykrx.py`(기본) 또는 필요 시 legacy `crawl_kr_data_fallback.py` 병행입니다.
 
 ## KR News Diagnostics
 
@@ -109,18 +120,18 @@ Download pre-built snapshots from GitHub releases (no local build needed):
 ```bash
 # Download latest KR snapshot
 gh release download $(gh release list | head -1 | awk '{print $1}') \
-  --pattern '*kr*' --dir ../eit-market-data/artifacts/snapshots/
+  --pattern '*kr*' --dir ../eit-market-data/out/<run>/artifacts/snapshots/
 
 # Download latest US snapshot
 gh release download $(gh release list | head -1 | awk '{print $1}') \
-  --pattern '*us*' --dir ../eit-market-data/artifacts/snapshots/
+  --pattern '*us*' --dir ../eit-market-data/out/<run>/artifacts/snapshots/
 ```
 
 Then use directly:
 
 ```bash
-eit build-snapshot 2026-03 --market kr --bundle-dir ../eit-market-data/artifacts/snapshots
-eit build-snapshot 2026-03 --market us --bundle-dir ../eit-market-data/artifacts/snapshots
+eit build-snapshot 2026-03 --market kr --bundle-dir ../eit-market-data/artifacts/kr/snapshots
+eit build-snapshot 2026-03 --market us --bundle-dir ../eit-market-data/artifacts/us/snapshots
 ```
 
 ### Manual Build (Local Development)
@@ -131,15 +142,36 @@ Build KR snapshot locally:
 python scripts/build_kr_snapshot.py --as-of 2026-03-31 --profile official --force
 ```
 
-For historical months outside the public FDR recent window, backfill `cap_daily` first:
+For historical months, backfill `cap_daily` with the official collector first:
 
 ```bash
+python scripts/crawl_kr_data_pykrx.py --start 2025-01-01 --end 2026-03-31 --output-root data
+
+# only if official collector cannot complete required range
 python scripts/crawl_kr_data_fallback.py --start 2025-01-01 --end 2026-03-31
 python scripts/build_kr_snapshot.py --as-of 2025-12-31 --profile official --force
 ```
 
-The fallback crawler defaults to full public KOSPI/KOSDAQ listings. Pass
-`--universe-csv universes/kr_universe.csv` only for pilot-sized runs.
+`run_crawling.sh` supports explicit control of delay/log settings for stable batch runs:
+
+```bash
+DRY_RUN=1 \
+  START_MONTH=<YYYY-MM> END_MONTH=<YYYY-MM> \
+  LOG_DIR=logs CRAWL_DELAY_SECONDS=0.8 DART_DELAY_SECONDS=2.5 \
+  MAIN_PHASE_DELAY_SECONDS=1 MIN_CAP_DAILY_FILES=100 CAP_DAILY_THRESHOLD=90 \
+  RUN_ID=$(date +%Y%m%d_%H%M%S) ./run_crawling.sh us
+```
+
+The command writes a per-run log at:
+
+```text
+logs/crawling_${RUN_ID}.log
+```
+
+`MIN_CAP_DAILY_FILES` controls the auto-mode cap file threshold; `CAP_DAILY_THRESHOLD` controls whether phase-1 official crawl is forced before US/KR snapshot phases.
+`PHASE_TIMEOUT_SECONDS` can be set to a positive value (seconds) to hard-stop a stalled phase.
+`BASE_MONTH`는 기준월(기본: 직전 달)을 덮어쓰고, `LOOKBACK_MONTHS`는 기본으로 처리할 개월 수를 정합니다(기본 `12`).
+`START_MONTH`/`END_MONTH`를 모두 생략하면 `END_MONTH=BASE_MONTH`, `START_MONTH=END_MONTH - LOOKBACK_MONTHS + 1`로 자동 계산합니다.
 
 Build US snapshot locally (requires `FRED_API_KEY`, `SEC_EDGAR_USER_AGENT`):
 
@@ -155,12 +187,17 @@ python scripts/run_daily_batch.py --as-of 2026-02-27
 
 For multi-year historical backfills, `scripts/backfill_all.py` caches 32 DART quarters per ticker by default
 (`--dart-quarters`) so early replay months have point-in-time financial statements.
-`./run_crawling.sh kr` and auto mode also run the public fallback crawler first when historical
+`./run_crawling.sh kr` and auto mode also run the pykrx crawler first when historical
 `data/market/cap_daily/` coverage is incomplete.
-Override `START_MONTH`/`END_MONTH` when the public source only covers a shorter range, e.g.
+Override `START_MONTH`/`END_MONTH` to bound long-range replay runs, e.g.
 `START_MONTH=2023-05 END_MONTH=2026-03 ./run_crawling.sh auto`.
 
-Output files are written under `artifacts/snapshots/YYYY-MM/`:
+Output files are written under:
+
+- `artifacts/kr/snapshots/YYYY-MM/`
+- `artifacts/us/snapshots/YYYY-MM/`
+
+(`run_daily_batch.py` writes to `out/<run>/artifacts/snapshots/YYYY-MM/` for CI batch artifacts.)
 
 - `snapshot.json` — Point-in-time snapshot data
 - `metadata.json` — Provider metadata and verification info
@@ -226,4 +263,4 @@ See [docs/us-developer-guide.md](docs/us-developer-guide.md) for provider detail
 - Cron: `30 22 * * 0-4` (UTC), which is `07:30 Asia/Seoul` on weekdays
 - Current daily batch entrypoint: `python scripts/run_daily_batch.py`
 - Batch artifacts are written under `out/<as_of>_<timestamp>/` and uploaded as GitHub Actions artifacts
-- Current scheduled batch scope is KR preflight + KR fallback crawl + KR/US snapshot build
+- Current scheduled batch scope is KR preflight + KR official pykrx crawl + KR/US snapshot build

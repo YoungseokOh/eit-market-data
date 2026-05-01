@@ -401,7 +401,7 @@ python ../eit-market-data/scripts/build_us_snapshot.py \
   --universe AAPL,MSFT,GOOGL
 
 # 5. Use in pipeline
-eit build-snapshot 2026-02 --market us --bundle-dir ../eit-market-data/artifacts/snapshots
+eit build-snapshot 2026-02 --market us --bundle-dir ../eit-market-data/artifacts/us/snapshots
 ```
 
 **Advantage**: Full control, ability to customize universe, verify data freshness.

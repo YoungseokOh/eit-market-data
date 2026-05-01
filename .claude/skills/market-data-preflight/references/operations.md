@@ -3,7 +3,8 @@
 ## Primary entrypoints
 
 - `python scripts/preflight_kr_data.py --as-of YYYY-MM-DD --ticker 005930`
-- `python scripts/crawl_kr_data.py --as-of YYYY-MM-DD --universe-csv universes/kr_universe.csv --output-root out/data`
+- `python scripts/crawl_kr_data_pykrx.py --start YYYY-MM-DD --end YYYY-MM-DD --output-root data`
+- `python scripts/crawl_kr_data_fallback.py --start YYYY-MM-DD --end YYYY-MM-DD --output-root data` (legacy)
 - `python scripts/build_kr_snapshot.py --as-of YYYY-MM-DD --profile ci_safe --force`
 - `python scripts/run_daily_batch.py --as-of YYYY-MM-DD --snapshot-profile ci_safe --force-snapshot`
 
@@ -38,4 +39,3 @@
   - `metadata.json`
   - `manifest.json`
   - `summary.json`
-

@@ -9,7 +9,6 @@ from datetime import date, datetime
 from pathlib import Path
 
 import pandas as pd
-from pykrx import stock
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
@@ -24,6 +23,9 @@ from eit_market_data.kr.krx_auth import (
     ensure_krx_authenticated_session,
     install_pykrx_krx_session_hooks,
 )
+from eit_market_data.kr.pykrx_loader import load_pykrx_stock
+
+stock = load_pykrx_stock()
 
 DELAY = 0.3
 START = "20240101"

@@ -36,7 +36,7 @@ def _normalize_ticker(ticker: str) -> str:
 
 
 class PykrxProvider:
-    """Korean market data provider backed by public FinanceDataReader routes.
+    """Korean market data provider backed by pykrx.
 
     Implements:
     - PriceProvider
@@ -339,7 +339,7 @@ def get_kr_universe(
 ) -> list[str]:
     """Return top_n Korean tickers by market cap as of the given date.
 
-    Uses FinanceDataReader public listings to dynamically fetch KOSPI + KOSDAQ tickers.
+    Uses pykrx listings to dynamically fetch KOSPI + KOSDAQ tickers.
     Returns 6-digit stock codes sorted by market cap descending.
     """
     if markets is None:

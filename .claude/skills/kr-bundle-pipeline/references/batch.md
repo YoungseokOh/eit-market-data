@@ -8,7 +8,9 @@
 ## Expected steps
 
 1. `preflight`
-2. `crawl_kr_data`
+2. optional: `crawl_kr_data_pykrx`
+   - historical backfill normally uses official collector; legacy FnGuide fallback `crawl_kr_data_fallback`
+     is used only when needed for historical repair.
 3. `build_kr_snapshot`
 4. write `summary.json`
 
@@ -23,4 +25,3 @@
 - `out/<as_of>_<timestamp>/summary.json`
 - `out/<as_of>_<timestamp>/logs/*.log`
 - `out/<as_of>_<timestamp>/artifacts/snapshots/YYYY-MM/*.json`
-

@@ -2,6 +2,10 @@
 
 Date: 2026-03-12
 
+> 참고: 이 문서는 2026-03-12 기준의 평가 기록입니다.
+> 이후 운영 설계가 변경되어 현재 기본 KR 경로는 공식 pykrx 중심으로 재정비되었으나,
+> 본 문서는 당시 `FinanceDataReader` 대체 가능성 평가 근거를 보존합니다.
+
 ## Summary
 
 Scope is limited to the KRX-authenticated parts of the KR bundle:

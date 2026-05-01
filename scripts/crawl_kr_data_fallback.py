@@ -8,6 +8,8 @@ import argparse
 import concurrent.futures
 import json
 import re
+import threading
+import time
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -24,14 +26,34 @@ DEFAULT_END = date.today().isoformat()
 
 FG_BASE = "https://cdn.fnguide.com/SVO2/json/chart"
 FG_TIMEOUT = 10
-FG_MAX_WORKERS = 24
+FG_MAX_WORKERS = 12
 FG_RETRIES = 2
+FG_REQUEST_DELAY_SECONDS = 0.2
 
 INDEX_SYMBOLS = {
     "KOSPI": "YAHOO:^KS11",
     "KOSDAQ": "YAHOO:^KQ11",
     "KOSPI200": "YAHOO:^KS200",
 }
+
+
+class _RequestThrottle:
+    def __init__(self, interval_seconds: float) -> None:
+        self._interval = max(0.0, float(interval_seconds))
+        self._lock = threading.Lock()
+        self._next_allowed = 0.0
+
+    def wait(self) -> None:
+        if self._interval <= 0:
+            return
+
+        with self._lock:
+            now = time.monotonic()
+            delay = max(0.0, self._next_allowed - now)
+            self._next_allowed = now + delay + self._interval
+
+        if delay > 0:
+            time.sleep(delay)
 
 
 def _to_num(value: object) -> float | None:
@@ -59,17 +81,22 @@ def _parse_json_response(resp: requests.Response) -> dict | None:
         return None
 
 
-def _fnguide_get(path: str) -> dict | None:
+def _fnguide_get(path: str, request_timeout: int, throttle: _RequestThrottle, request_delay: float) -> dict | None:
     url = f"{FG_BASE}/{path}"
     headers = {"User-Agent": "Mozilla/5.0"}
     for _ in range(FG_RETRIES + 1):
         try:
-            resp = requests.get(url, headers=headers, timeout=FG_TIMEOUT)
+            throttle.wait()
+            resp = requests.get(url, headers=headers, timeout=request_timeout)
         except requests.RequestException:
+            if request_delay > 0:
+                time.sleep(request_delay)
             continue
         parsed = _parse_json_response(resp)
         if parsed is not None:
             return parsed
+        if request_delay > 0:
+            time.sleep(request_delay)
     return None
 
 
@@ -132,8 +159,16 @@ def _extract_daily_cap(
     start: pd.Timestamp,
     end: pd.Timestamp,
     month_end_map: dict[pd.Period, pd.Timestamp],
+    request_timeout: int,
+    request_delay: float,
+    throttle: _RequestThrottle,
 ) -> list[dict]:
-    obj = _fnguide_get(f"01_01/chart_A{meta.ticker}_3Y.json")
+    obj = _fnguide_get(
+        f"01_01/chart_A{meta.ticker}_3Y.json",
+        request_timeout=request_timeout,
+        throttle=throttle,
+        request_delay=request_delay,
+    )
     if not obj:
         return []
 
@@ -188,8 +223,19 @@ def _extract_x_multiplier(name: str) -> float | None:
         return None
 
 
-def _extract_monthly_fundamental(meta: TickerMeta, month_ends: list[pd.Timestamp]) -> list[dict]:
-    obj = _fnguide_get(f"01_06/chart_A{meta.ticker}_D.json")
+def _extract_monthly_fundamental(
+    meta: TickerMeta,
+    month_ends: list[pd.Timestamp],
+    request_timeout: int,
+    request_delay: float,
+    throttle: _RequestThrottle,
+) -> list[dict]:
+    obj = _fnguide_get(
+        f"01_06/chart_A{meta.ticker}_D.json",
+        request_timeout=request_timeout,
+        throttle=throttle,
+        request_delay=request_delay,
+    )
     if not obj:
         return []
 
@@ -291,12 +337,25 @@ def collect_cap_daily(
     end: pd.Timestamp,
     month_ends: list[pd.Timestamp],
     out_root: Path,
+    request_timeout: int,
+    max_workers: int,
+    request_delay: float,
 ) -> None:
     month_end_map = {month_end.to_period("M"): month_end.normalize() for month_end in month_ends}
     rows: list[dict] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=FG_MAX_WORKERS) as executor:
+    throttle = _RequestThrottle(request_delay)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
-            executor.submit(_extract_daily_cap, meta, start, end, month_end_map): meta.ticker
+            executor.submit(
+                _extract_daily_cap,
+                meta,
+                start,
+                end,
+                month_end_map,
+                request_timeout,
+                request_delay,
+                throttle,
+            ): meta.ticker
             for meta in tickers
         }
         for i, future in enumerate(concurrent.futures.as_completed(futures), start=1):
@@ -311,11 +370,22 @@ def collect_monthly_fundamental(
     tickers: list[TickerMeta],
     month_ends: list[pd.Timestamp],
     out_root: Path,
+    request_timeout: int,
+    max_workers: int,
+    request_delay: float,
 ) -> None:
     rows: list[dict] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=FG_MAX_WORKERS) as executor:
+    throttle = _RequestThrottle(request_delay)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
-            executor.submit(_extract_monthly_fundamental, meta, month_ends): meta.ticker
+            executor.submit(
+                _extract_monthly_fundamental,
+                meta,
+                month_ends,
+                request_timeout,
+                request_delay,
+                throttle,
+            ): meta.ticker
             for meta in tickers
         }
         for i, future in enumerate(concurrent.futures.as_completed(futures), start=1):
@@ -410,7 +480,10 @@ def missing_cap_daily_files(out_root: Path, month_ends: list[pd.Timestamp]) -> l
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Backfill KR market-cap snapshots and related fallback datasets."
+        description=(
+            "Backfill KR market-cap snapshots and related legacy fallback datasets. "
+            "Use this collector only when the default KR path needs historical repair."
+        )
     )
     parser.add_argument("--start", default=DEFAULT_START, help="Start date (YYYY-MM-DD).")
     parser.add_argument("--end", default=DEFAULT_END, help="End date (YYYY-MM-DD).")
@@ -426,6 +499,24 @@ def main() -> None:
         "--output-root",
         default=str(OUTPUT_ROOT),
         help="Base output directory.",
+    )
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=FG_MAX_WORKERS,
+        help="Maximum concurrent requests for legacy FnGuide fallback pulls.",
+    )
+    parser.add_argument(
+        "--request-timeout",
+        type=int,
+        default=FG_TIMEOUT,
+        help="Legacy fallback request timeout in seconds.",
+    )
+    parser.add_argument(
+        "--request-delay",
+        type=float,
+        default=FG_REQUEST_DELAY_SECONDS,
+        help="Minimum delay in seconds between fallback requests (global throttle).",
     )
     parser.add_argument(
         "--skip-fundamental",
@@ -448,6 +539,9 @@ def main() -> None:
     end = _parse_iso_date(args.end)
     out_root = Path(args.output_root)
     universe_csv = Path(args.universe_csv) if args.universe_csv else None
+    max_workers = max(1, args.max_workers)
+    request_timeout = max(1, args.request_timeout)
+    request_delay = max(0.0, args.request_delay)
 
     month_ends = _month_end_business_days(start, end)
     print("[INFO] month-end business days:", [d.strftime("%Y-%m-%d") for d in month_ends])
@@ -455,9 +549,25 @@ def main() -> None:
     tickers = _load_tickers(universe_csv)
     print(f"[INFO] tickers loaded: {len(tickers)}")
 
-    collect_cap_daily(tickers, start, end, month_ends, out_root)
+    collect_cap_daily(
+        tickers=tickers,
+        start=start,
+        end=end,
+        month_ends=month_ends,
+        out_root=out_root,
+        request_timeout=request_timeout,
+        max_workers=max_workers,
+        request_delay=request_delay,
+    )
     if not args.skip_fundamental:
-        collect_monthly_fundamental(tickers, month_ends, out_root)
+        collect_monthly_fundamental(
+            tickers=tickers,
+            month_ends=month_ends,
+            out_root=out_root,
+            request_timeout=request_timeout,
+            max_workers=max_workers,
+            request_delay=request_delay,
+        )
     if not args.skip_index:
         collect_index_ohlcv(start, end, out_root)
     if not args.skip_sector:

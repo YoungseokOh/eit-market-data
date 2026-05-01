@@ -233,7 +233,7 @@ def main() -> None:
     if all_ok:
         print(f"\n{PASS} 모든 테스트 통과 — 본 백필 실행 가능합니다.")
         print("\n실행 명령:")
-        print("  nohup ./run_crawling.sh > /dev/null 2>&1 &")
+        print("  RUN_ID=$(date +%Y%m%d_%H%M%S) nohup ./run_crawling.sh us > >(tee logs/crawling_${RUN_ID}.log) 2>&1 &")
         sys.exit(0)
     else:
         failed = [n for n, v in results.items() if v == FAIL]

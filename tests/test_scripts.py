@@ -190,7 +190,7 @@ def test_crawl_kr_data_fallback_extracts_daily_cap(monkeypatch) -> None:
     monkeypatch.setattr(
         module,
         "_fnguide_get",
-        lambda path: {
+        lambda path, *_args, **_kwargs: {
             "CHART": [
                 {"TRD_DT": "2024-01-31", "J_PRC": "70,000", "MKT_CAP": "4200000"},
                 {"TRD_DT": "2024-02-01", "J_PRC": "0", "MKT_CAP": "4210000"},
@@ -204,6 +204,9 @@ def test_crawl_kr_data_fallback_extracts_daily_cap(monkeypatch) -> None:
         pd.Timestamp("2024-01-01"),
         pd.Timestamp("2024-01-31"),
         {pd.Period("2024-01", freq="M"): pd.Timestamp("2024-01-31")},
+        10,
+        0.0,
+        module._RequestThrottle(0.0),
     )
 
     assert len(rows) == 1
@@ -221,7 +224,7 @@ def test_crawl_kr_data_fallback_maps_month_label_to_month_end(monkeypatch) -> No
     monkeypatch.setattr(
         module,
         "_fnguide_get",
-        lambda path: {
+        lambda path, *_args, **_kwargs: {
             "CHART": [
                 {"TRD_DT": "2024/02/01", "J_PRC": "71,000", "MKT_CAP": "4210000"},
             ]
@@ -234,6 +237,9 @@ def test_crawl_kr_data_fallback_maps_month_label_to_month_end(monkeypatch) -> No
         pd.Timestamp("2024-02-01"),
         pd.Timestamp("2024-02-29"),
         {pd.Period("2024-02", freq="M"): pd.Timestamp("2024-02-29")},
+        10,
+        0.0,
+        module._RequestThrottle(0.0),
     )
 
     assert len(rows) == 1
@@ -335,6 +341,155 @@ def test_crawl_kr_data_fallback_reports_missing_cap_daily_files(tmp_path: Path) 
     missing = module.missing_cap_daily_files(tmp_path, month_ends)
 
     assert missing == [tmp_path / "market/cap_daily/KOSDAQ_20220128.parquet"]
+
+
+def test_fill_kr_cap_daily_gap_normalizes_pykrx_market_cap_frame() -> None:
+    module = _load_module(
+        Path("scripts/fill_kr_cap_daily_gap.py"),
+        "fill_kr_cap_daily_gap_normalize_test",
+    )
+    frame = pd.DataFrame(
+        {
+            "종가": [70000],
+            "시가총액": [420000000000000],
+            "상장주식수": [5960000000],
+            "거래량": [100],
+            "거래대금": [7000000],
+        },
+        index=pd.Index(["005930"], name="티커"),
+    )
+
+    normalized = module._normalize_market_cap_frame(
+        frame,
+        "KOSPI",
+        pd.Timestamp("2022-01-28"),
+        {"005930": "삼성전자"},
+    )
+
+    assert normalized is not None
+    assert normalized["종목코드"].tolist() == ["005930"]
+    assert normalized["종목명"].tolist() == ["삼성전자"]
+    assert normalized["시장"].tolist() == ["KOSPI"]
+    assert normalized["source_trade_date"].tolist() == [pd.Timestamp("2022-01-28")]
+
+
+def test_fill_kr_cap_daily_gap_reports_missing_files(tmp_path: Path) -> None:
+    module = _load_module(
+        Path("scripts/fill_kr_cap_daily_gap.py"),
+        "fill_kr_cap_daily_gap_missing_test",
+    )
+    (tmp_path / "market/cap_daily").mkdir(parents=True)
+    (tmp_path / "market/cap_daily/KOSPI_20220128.parquet").write_text("stub")
+    month_ends = [pd.Timestamp("2022-01-28")]
+
+    missing = module.missing_cap_daily_files(tmp_path, month_ends)
+
+    assert missing == [tmp_path / "market/cap_daily/KOSDAQ_20220128.parquet"]
+
+
+def test_crawl_kr_data_pykrx_normalizes_market_cap_frame() -> None:
+    module = _load_module(
+        Path("scripts/crawl_kr_data_pykrx.py"),
+        "crawl_kr_data_pykrx_normalize_cap_test",
+    )
+    frame = pd.DataFrame(
+        {
+            "종가": [70000],
+            "시가총액": [420000000000000],
+            "상장주식수": [5960000000],
+            "거래량": [100],
+            "거래대금": [7000000],
+        },
+        index=pd.Index(["005930"], name="티커"),
+    )
+
+    normalized = module._normalize_market_cap_frame(
+        frame,
+        "KOSPI",
+        pd.Timestamp("2024-01-31"),
+        {"005930": "삼성전자"},
+    )
+
+    assert normalized is not None
+    assert normalized["종목코드"].tolist() == ["005930"]
+    assert normalized["종목명"].tolist() == ["삼성전자"]
+    assert normalized["시장"].tolist() == ["KOSPI"]
+    assert normalized["source_trade_date"].tolist() == [pd.Timestamp("2024-01-31")]
+
+
+def test_crawl_kr_data_pykrx_collects_monthly_cap_and_fundamental(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_module(
+        Path("scripts/crawl_kr_data_pykrx.py"),
+        "crawl_kr_data_pykrx_collect_test",
+    )
+    saved: dict[Path, pd.DataFrame] = {}
+
+    def _fake_to_parquet(self, path, index=False):  # noqa: ANN001
+        _ = index
+        saved[Path(path)] = self.copy()
+
+    class DummyStock:
+        @staticmethod
+        def get_market_cap(date_str, market):  # noqa: ANN001
+            assert date_str == "20240131"
+            assert market == "KOSPI"
+            return pd.DataFrame(
+                {
+                    "종가": [70000],
+                    "시가총액": [420000000000000],
+                    "상장주식수": [5960000000],
+                    "거래량": [100],
+                    "거래대금": [7000000],
+                },
+                index=pd.Index(["005930"], name="티커"),
+            )
+
+        @staticmethod
+        def get_market_fundamental(date_str, market):  # noqa: ANN001
+            assert date_str == "20240131"
+            assert market == "KOSPI"
+            return pd.DataFrame(
+                {
+                    "BPS": [50000],
+                    "PER": [12.5],
+                    "PBR": [1.4],
+                    "EPS": [5600],
+                    "DIV": [2.0],
+                    "DPS": [1400],
+                },
+                index=pd.Index(["005930"], name="티커"),
+            )
+
+    monkeypatch.setattr(module, "load_pykrx_stock", lambda: DummyStock())
+    monkeypatch.setattr(
+        module,
+        "_month_end_trading_days",
+        lambda stock, start, end, delay_seconds=0.0: [pd.Timestamp("2024-01-31")],
+    )
+    monkeypatch.setattr(module.pd.DataFrame, "to_parquet", _fake_to_parquet)
+
+    written = module.collect_pykrx_range(
+        start=pd.Timestamp("2024-01-01"),
+        end=pd.Timestamp("2024-01-31"),
+        out_root=tmp_path,
+        markets=["KOSPI"],
+        delay_seconds=0.0,
+        skip_meta=True,
+        skip_ohlcv=True,
+        skip_index=True,
+        skip_sector=True,
+    )
+
+    cap_path = tmp_path / "market/cap_daily/KOSPI_20240131.parquet"
+    fund_path = tmp_path / "market/fundamental/KOSPI_20240131.parquet"
+    assert written == [cap_path, fund_path]
+    assert cap_path in saved
+    assert fund_path in saved
+    assert saved[cap_path]["종목코드"].tolist() == ["005930"]
+    assert saved[fund_path]["PER"].tolist() == [12.5]
 
 
 def test_build_us_snapshot_supports_external_artifacts_root(monkeypatch, tmp_path: Path) -> None:

@@ -40,6 +40,7 @@ from eit_market_data.kr.krx_auth import (
     ensure_krx_authenticated_session,
     install_pykrx_krx_session_hooks,
 )
+from eit_market_data.kr.pykrx_loader import load_pykrx_stock
 
 logger = logging.getLogger(__name__)
 
@@ -221,7 +222,7 @@ def fetch_foreign_exhaustion(stock, as_of: date, out: Path, market: str) -> None
 
 def run(start: date, end: date, out: Path, markets: list[str], skip: list[str]) -> None:
     try:
-        from pykrx import stock
+        stock = load_pykrx_stock()
     except ImportError:
         print("pykrx not installed. Run: pip install pykrx")
         sys.exit(1)

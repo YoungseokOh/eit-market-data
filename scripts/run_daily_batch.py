@@ -1,4 +1,5 @@
 from __future__ import annotations
+# ruff: noqa: E402
 
 from pathlib import Path as _Path
 from dotenv import load_dotenv as _load_dotenv
@@ -158,16 +159,14 @@ def run_daily_batch(
 
     if overall_status != "failed":
         crawl = run_step(
-            "crawl_kr_data_fallback",
+            "crawl_kr_data_pykrx",
             [
                 sys.executable,
-                "scripts/crawl_kr_data_fallback.py",
+                "scripts/crawl_kr_data_pykrx.py",
                 "--start",
                 f"{as_of.year}-01-01",
                 "--end",
                 as_of.isoformat(),
-                "--universe-csv",
-                str(universe_csv),
                 "--output-root",
                 str(data_dir),
             ],

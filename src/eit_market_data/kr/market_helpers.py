@@ -31,7 +31,6 @@ _INDEX_FDR_SYMBOLS: dict[str, str] = {
 }
 CAP_MONTHLY_DIR = _PROJECT_ROOT / "data/market/cap"
 _LOCAL_CAP_MONTHLY_MAX_GAP_DAYS = 45
-_PUBLIC_MARKET_CAP_MAX_AGE_DAYS = 45
 _LOCAL_CAP_DAILY_MAX_GAP_DAYS = 7
 
 _NON_AUTHORITATIVE_SECTOR_COLUMNS = {"Industry", "ListingDate"}
@@ -119,9 +118,49 @@ def fetch_stock_ohlcv_frame(
     end: date,
     logger_: logging.Logger | None = None,
 ) -> tuple[Any | None, str]:
-    """Fetch stock OHLCV through FinanceDataReader public routes."""
+    """Fetch stock OHLCV with pykrx official route first, then public fallback."""
     active_logger = logger_ or logger
     norm_ticker = normalize_ticker(ticker)
+
+    try:
+        from eit_market_data.kr.pykrx_loader import load_pykrx_stock
+
+        stock = load_pykrx_stock()
+        install_pykrx_krx_session_hooks()
+        ensure_krx_authenticated_session(interactive=False)
+
+        for call in (
+            lambda: stock.get_market_ohlcv_by_date(
+                date_to_yyyymmdd(start),
+                date_to_yyyymmdd(end),
+                norm_ticker,
+                adjusted=True,
+            ),
+            lambda: stock.get_market_ohlcv_by_date(
+                date_to_yyyymmdd(start),
+                date_to_yyyymmdd(end),
+                norm_ticker,
+            ),
+        ):
+            try:
+                df = call()
+            except TypeError:
+                # compatibility for older pykrx signatures that don't support adjusted kwarg
+                continue
+            except Exception as exc:
+                active_logger.warning(
+                    "Ticker %s fetch failed in pykrx: %s",
+                    norm_ticker,
+                    exc,
+                )
+                continue
+            if df is not None and not df.empty:
+                return df, "pykrx"
+    except ImportError:
+        # pykrx may not be installed in minimal environments
+        pass
+    except Exception as exc:
+        active_logger.warning("Ticker %s fetch failed in pykrx: %s", norm_ticker, exc)
 
     try:
         fdr = _load_fdr()
@@ -149,27 +188,26 @@ def _fetch_index_ohlcv_frame_pykrx(
     active_logger = logger_ or logger
 
     try:
-        from pykrx import stock
+        from eit_market_data.kr.pykrx_loader import load_pykrx_stock
+
+        stock = load_pykrx_stock()
 
         install_pykrx_krx_session_hooks()
         ensure_krx_authenticated_session(interactive=False)
 
-        try:
-            df = stock.get_index_ohlcv_by_date(
-                date_to_yyyymmdd(start),
-                date_to_yyyymmdd(end),
-                index_code,
-                name_display=False,
-            )
-        except Exception as exc:
-            active_logger.warning("Index %s fetch failed in pykrx: %s", index_code, exc)
-            df = None
-
+        df = stock.get_index_ohlcv_by_date(
+            date_to_yyyymmdd(start),
+            date_to_yyyymmdd(end),
+            index_code,
+            name_display=False,
+        )
         if df is not None and not df.empty:
             df.columns.name = INDEX_CODE_NAMES.get(index_code, index_code)
             return df, "pykrx"
     except ImportError:
         return None, ""
+    except Exception as exc:
+        active_logger.warning("Index %s fetch failed in pykrx: %s", index_code, exc)
 
     return None, ""
 
@@ -181,11 +219,15 @@ def fetch_index_ohlcv_frame(
     logger_: logging.Logger | None = None,
     official_only: bool = True,
 ) -> tuple[Any | None, str]:
-    """Fetch index OHLCV from public FinanceDataReader index symbols."""
+    """Fetch index OHLCV with pykrx official source first, then public fallback."""
     active_logger = logger_ or logger
-    symbol = _INDEX_FDR_SYMBOLS.get(index_code)
 
-    if symbol is not None:
+    frame, source = _fetch_index_ohlcv_frame_pykrx(index_code, start, end, logger_=active_logger)
+    if frame is not None and not frame.empty:
+        return frame, source
+
+    symbol = _INDEX_FDR_SYMBOLS.get(index_code)
+    if not official_only and symbol is not None:
         try:
             fdr = _load_fdr()
             df = fdr.DataReader(symbol, start.isoformat(), end.isoformat())
@@ -197,13 +239,9 @@ def fetch_index_ohlcv_frame(
         except Exception as exc:
             active_logger.warning("Index %s fetch failed in fdr: %s", index_code, exc)
 
-    frame, source = _fetch_index_ohlcv_frame_pykrx(index_code, start, end, logger_=active_logger)
-    if frame is not None and not frame.empty:
-        return frame, source
-
     if not official_only:
         active_logger.warning(
-            "Index %s official fetch returned empty; Yahoo fallback is disabled",
+            "Index %s official and public fetch returned empty",
             index_code,
         )
 
@@ -211,8 +249,20 @@ def fetch_index_ohlcv_frame(
 
 
 def fetch_market_ticker_list(as_of: date, market: str) -> list[str]:
-    """Fetch market ticker list through FinanceDataReader public listings."""
-    _ = as_of
+    """Fetch market ticker list through pykrx first, with public fallback."""
+    try:
+        from eit_market_data.kr.pykrx_loader import load_pykrx_stock
+
+        stock = load_pykrx_stock()
+        install_pykrx_krx_session_hooks()
+        ensure_krx_authenticated_session(interactive=False)
+        tickers = stock.get_market_ticker_list(date_to_yyyymmdd(as_of), market=market.upper())
+        return [normalize_ticker(t) for t in tickers if str(t).strip()]
+    except ImportError:
+        pass
+    except Exception as exc:
+        logger.warning("Market ticker list fetch failed in pykrx for %s: %s", market, exc)
+
     try:
         frame = _normalize_listing_frame(_load_fdr().StockListing(market.upper()))
         if frame is not None and not frame.empty:
@@ -220,13 +270,9 @@ def fetch_market_ticker_list(as_of: date, market: str) -> list[str]:
     except ImportError:
         pass
     except Exception as exc:
-        logger.warning("Market ticker list fetch failed in fdr for %s: %s", market, exc)
+        logger.warning("Market ticker list fallback to fdr failed in %s: %s", market, exc)
 
-    from pykrx import stock
-
-    install_pykrx_krx_session_hooks()
-    ensure_krx_authenticated_session(interactive=False)
-    return stock.get_market_ticker_list(date_to_yyyymmdd(as_of), market=market)
+    return []
 
 
 def _load_local_monthly_cap_snapshot(
@@ -294,21 +340,34 @@ def fetch_market_cap_frame(as_of: date, market: str) -> Any | None:
 
     Fallback order:
     1. Local daily cache (data/market/cap_daily/)
-    2. FDR public StockListing (within 45 days)
-    3. pykrx KRX authenticated path
+    2. pykrx KRX authenticated endpoint
+    3. FDR public StockListing (diagnostic)
     """
     local_frame = _load_local_market_cap_snapshot(as_of, market)
     if local_frame is not None and not local_frame.empty:
         return local_frame
 
-    age_days = (date.today() - as_of).days
-    if age_days > _PUBLIC_MARKET_CAP_MAX_AGE_DAYS:
-        logger.warning(
-            "Market cap snapshot for %s as of %s is outside the public FDR window",
-            market,
-            as_of,
-        )
-        return None
+    try:
+        from eit_market_data.kr.pykrx_loader import load_pykrx_stock
+
+        stock = load_pykrx_stock()
+        install_pykrx_krx_session_hooks()
+        ensure_krx_authenticated_session(interactive=False)
+        df = stock.get_market_cap(date_to_yyyymmdd(as_of), market=market)
+        if df is None or df.empty:
+            return None
+        expected = {"종가", "시가총액", "거래량", "거래대금"}
+        if not expected.issubset(set(df.columns)):
+            raise RuntimeError(
+                f"KRX market cap returned unexpected columns for {market}: {list(df.columns)}"
+            )
+        return df
+    except ImportError:
+        pass
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        logger.warning("Market cap fetch failed in pykrx for %s: %s", market, exc)
 
     try:
         frame = _normalize_listing_frame(_load_fdr().StockListing(market.upper()))
@@ -335,33 +394,24 @@ def fetch_market_cap_frame(as_of: date, market: str) -> Any | None:
             return renamed
     except ImportError:
         pass
-    except RuntimeError:
-        raise
     except Exception as exc:
         logger.warning("Market cap fetch failed in fdr for %s: %s", market, exc)
-
-    from pykrx import stock
-
-    install_pykrx_krx_session_hooks()
-    ensure_krx_authenticated_session(interactive=False)
-    df = stock.get_market_cap(date_to_yyyymmdd(as_of), market=market)
-    if df is None or df.empty:
-        return None
-    expected = {"종가", "시가총액", "거래량", "거래대금"}
-    if not expected.issubset(set(df.columns)):
-        raise KrxAuthRequired(
-            f"KRX market cap returned unexpected columns for {market}: {list(df.columns)}"
-        )
-    return df
+    return None
 
 
 def fetch_market_fundamental_frame(as_of: date, market: str) -> Any | None:
     """Fetch market fundamental snapshot through the authenticated KRX path."""
-    from pykrx import stock
+    try:
+        from eit_market_data.kr.pykrx_loader import load_pykrx_stock
 
-    install_pykrx_krx_session_hooks()
-    ensure_krx_authenticated_session(interactive=False)
-    df = stock.get_market_fundamental(date_to_yyyymmdd(as_of), market=market)
+        stock = load_pykrx_stock()
+        install_pykrx_krx_session_hooks()
+        ensure_krx_authenticated_session(interactive=False)
+        df = stock.get_market_fundamental(date_to_yyyymmdd(as_of), market=market)
+    except ImportError:
+        return None
+    except Exception:
+        return None
     if df is None or df.empty:
         return None
     expected = {"BPS", "PER", "PBR", "EPS", "DIV", "DPS"}
@@ -394,9 +444,59 @@ def fetch_live_sector_classification_map(
     logger_: logging.Logger | None = None,
     lookback_days: int = 8,
 ) -> tuple[dict[str, str], date | None]:
-    """Build a live sector map from FinanceDataReader KRX-DESC listings."""
+    """Build a live sector map from pykrx sector classifications, then FDR fallback."""
     active_logger = logger_ or logger
     _ = lookback_days
+
+    try:
+        from eit_market_data.kr.pykrx_loader import load_pykrx_stock
+
+        stock = load_pykrx_stock()
+        install_pykrx_krx_session_hooks()
+        ensure_krx_authenticated_session(interactive=False)
+        raw_frame = stock.get_market_sector_classifications(
+            date_to_yyyymmdd(as_of),
+            market=market,
+        )
+        if raw_frame is not None and not raw_frame.empty:
+            frame = raw_frame.copy()
+            if frame.index.name == "종목코드":
+                frame = frame.reset_index(names="종목코드")
+            elif "Code" in frame.columns and "종목코드" not in frame.columns:
+                frame["종목코드"] = frame["Code"]
+
+            if "종목코드" not in frame.columns:
+                return {}, None
+
+            if "업종명" not in frame.columns:
+                if "지수명" in frame.columns:
+                    frame["업종명"] = frame["지수명"]
+                elif "Sector" in frame.columns:
+                    frame["업종명"] = frame["Sector"]
+                elif "Industry" in frame.columns:
+                    frame["업종명"] = frame["Industry"]
+                elif "업종코드" in frame.columns:
+                    frame["업종명"] = frame["업종코드"]
+                else:
+                    return {}, None
+
+            sector_map: dict[str, str] = {}
+            for _, row in frame.iterrows():
+                code = normalize_ticker(str(row.get("종목코드", "")).strip())
+                if not code:
+                    continue
+                sector_map[code] = str(row.get("업종명", "")).strip() or "General"
+
+            return sector_map, as_of if sector_map else None
+    except ImportError:
+        pass
+    except Exception as exc:
+        active_logger.warning(
+            "Live sector classification from pykrx unavailable for %s as of %s: %s",
+            market,
+            as_of,
+            exc,
+        )
 
     try:
         frame = _normalize_listing_frame(_load_fdr().StockListing("KRX-DESC"))

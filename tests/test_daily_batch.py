@@ -110,10 +110,10 @@ def test_assess_crawl_outputs_reports_missing_categories(tmp_path: Path) -> None
     assert "index/ohlcv" in missing
 
 
-def test_run_daily_batch_uses_fallback_crawler(monkeypatch, tmp_path: Path) -> None:
+def test_run_daily_batch_uses_pykrx_crawler(monkeypatch, tmp_path: Path) -> None:
     module = _load_module(
         Path("scripts/run_daily_batch.py"),
-        "run_daily_batch_fallback_crawler_test",
+        "run_daily_batch_pykrx_crawler_test",
     )
     seen_commands: list[list[str]] = []
 
@@ -147,13 +147,10 @@ def test_run_daily_batch_uses_fallback_crawler(monkeypatch, tmp_path: Path) -> N
     assert summary["status"] == "ok"
     preflight_command = next(command for command in seen_commands if any("preflight_kr_data.py" in part for part in command))
     assert "--skip-news" in preflight_command
-    crawl_command = next(
-        command
-        for command in seen_commands
-        if any("crawl_kr_data_fallback.py" in part for part in command)
-    )
+    crawl_command = next(command for command in seen_commands if any("crawl_kr_data_pykrx.py" in part for part in command))
     assert "--start" in crawl_command
     assert "--end" in crawl_command
+    assert "--output-root" in crawl_command
 
 
 def test_build_kr_snapshot_summary_excludes_news_fields(tmp_path: Path) -> None:

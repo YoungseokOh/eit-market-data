@@ -1,8 +1,10 @@
 ---
 name: market-data-preflight
 description: |
-  Use before running Korean market-data collection, bundle export, or daily batch commands in
-  eit-market-data. Trigger when the user wants to run or debug preflight, crawl_kr_data.py,
+Use before running Korean market-data collection, bundle export, or daily batch commands in
+  eit-market-data. Trigger when the user wants to run or debug preflight, crawl_kr_data_pykrx.py
+  (official raw collection), `crawl_kr_data_fallback.py` (legacy FnGuide repair path),
+  `crawl_kr_data.py` (legacy authenticated recovery),
   build_kr_snapshot.py, run_daily_batch.py, GitHub Actions data jobs, or local environment setup.
   Also use when validating API keys, package installation, output directories, or batch readiness.
 ---

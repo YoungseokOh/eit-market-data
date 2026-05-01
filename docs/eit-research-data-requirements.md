@@ -166,15 +166,18 @@
 
 ---
 
-## 8. pykrx 수집 우선순위 요약
+## 8. KR 공식 수집 우선순위 요약
 
 | 데이터 | 필수 | lookback |
 |--------|------|----------|
 | OHLCV (close, high, low) | 필수 | 300 거래일 |
 | 시가총액 (`market_cap`) | 필수 | 단일 날짜 |
-| PER/PBR/EPS (`get_market_fundamental`) | 중요 | 단일 날짜 |
+| PER/PBR/EPS (`get_market_fundamental`) | 과거 기준/legacy(현재 KR 공식 경로 미사용) | 단일 날짜 |
 | 섹터 분류 | 필수 | 단일 날짜 |
 | 지수 OHLCV (KOSPI 1001) | 중요 | 300 거래일 |
 | 투자자 수급 | 선택 | 30일 |
 | 공매도 | 선택 | 30일 |
 | ETF | 선택 | 300 거래일 |
+
+실제 KR 공식 경로에서는 가격/마켓/섹터/벤치마크 조회를 `pykrx` 기반으로 처리하고,
+replay에서 필요한 `market_cap`/`last_close_price`는 DART + 로컬 보조 스냅샷(`cap_daily`) 계열과 결합해 사용합니다.

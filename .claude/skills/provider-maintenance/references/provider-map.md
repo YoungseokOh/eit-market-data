@@ -18,7 +18,9 @@
 ## Operational scripts
 
 - `scripts/preflight_kr_data.py`
-- `scripts/crawl_kr_data.py`
+- `scripts/crawl_kr_data_pykrx.py`
+- `scripts/crawl_kr_data_fallback.py`
+- `scripts/crawl_kr_data.py` (legacy authenticated recovery path, not default KR runtime)
 - `scripts/build_kr_snapshot.py`
 - `scripts/run_daily_batch.py`
 
@@ -37,4 +39,3 @@
 - Provider behavior change -> factory wiring + tests
 - New snapshot field -> schema + provider + bundle exporter + consumer contract
 - New dependency -> `pyproject.toml` + docs + environment checks
-

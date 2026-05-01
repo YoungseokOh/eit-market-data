@@ -5,10 +5,11 @@ Usage:
     python scripts/build_us_snapshot.py --as-of 2026-02-27
 
 This builds a complete US snapshot (YFinance + FRED + EDGAR) and saves it as:
-    artifacts/snapshots/YYYY-MM/snapshot.json
-    artifacts/snapshots/YYYY-MM/metadata.json
-    artifacts/snapshots/YYYY-MM/manifest.json
-    artifacts/snapshots/YYYY-MM/summary.json
+    artifacts/[market-subdir/]
+    └── snapshots/YYYY-MM/snapshot.json
+        metadata.json
+        manifest.json
+        summary.json
 """
 
 from __future__ import annotations

@@ -7,7 +7,8 @@ builds can proceed without a live DART connection.
 
 Usage:
     python scripts/seed_dart_cache.py
-    python scripts/seed_dart_cache.py --snapshots-dir artifacts/snapshots
+    python scripts/seed_dart_cache.py --snapshots-dir artifacts/kr/snapshots
+    python scripts/seed_dart_cache.py --snapshots-dir artifacts/kr/snapshots artifacts/us/snapshots
 """
 
 from __future__ import annotations
@@ -41,8 +42,12 @@ def _load_snapshots(snapshots_dir: Path) -> list[dict]:
     return snapshots
 
 
-def seed(snapshots_dir: Path) -> None:
-    seed_into_cache(snapshots_dir, _DART_CACHE_DIR)
+def seed(snapshots_dir: Path | list[Path]) -> None:
+    if isinstance(snapshots_dir, Path):
+        seed_into_cache(snapshots_dir, _DART_CACHE_DIR)
+        return
+    for directory in snapshots_dir:
+        seed_into_cache(directory, _DART_CACHE_DIR)
 
 
 def seed_into_cache(snapshots_dir: Path, cache_dir: Path) -> None:
@@ -92,12 +97,22 @@ def seed_into_cache(snapshots_dir: Path, cache_dir: Path) -> None:
     print(f"Cache dir: {cache_dir}")
 
 
+def _default_snapshot_dirs() -> list[Path]:
+    candidates = [
+        PROJECT_ROOT / "artifacts" / "kr" / "snapshots",
+        PROJECT_ROOT / "artifacts" / "us" / "snapshots",
+        PROJECT_ROOT / "artifacts" / "snapshots",
+    ]
+    return [path for path in candidates if path.exists()]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--snapshots-dir",
         type=Path,
-        default=PROJECT_ROOT / "artifacts" / "snapshots",
+        action="append",
+        default=None,
         help="Directory containing YYYY-MM/snapshot.json files",
     )
     parser.add_argument(
@@ -106,7 +121,11 @@ def main() -> None:
         help="Override the DART diskcache directory. Defaults to EIT_DART_CACHE_DIR or repo data/dart_cache.",
     )
     args = parser.parse_args()
-    seed_into_cache(args.snapshots_dir, args.cache_dir or _DART_CACHE_DIR)
+    snapshot_dirs = args.snapshots_dir or _default_snapshot_dirs()
+    if not snapshot_dirs:
+        print("No snapshot directory found; nothing to seed.")
+        return
+    seed(snapshot_dirs if len(snapshot_dirs) > 1 else snapshot_dirs[0], args.cache_dir or _DART_CACHE_DIR)
 
 
 if __name__ == "__main__":

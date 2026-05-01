@@ -196,7 +196,9 @@ def install_pykrx_krx_session_hooks() -> None:
         if _pykrx_hooks_installed:
             return
 
-        from pykrx.website.comm import webio
+        from eit_market_data.kr.pykrx_loader import load_pykrx_webio
+
+        webio = load_pykrx_webio()
 
         def _read_with_shared_get(self, **params):  # noqa: ANN001
             session = get_krx_session()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 
 import pandas as pd
 
@@ -62,53 +63,83 @@ def test_load_sector_snapshot_map_skips_non_authoritative_snapshot_in_official_m
     assert snapshot_path is None
 
 
-def test_fetch_index_ohlcv_frame_uses_public_symbol_mapping(monkeypatch) -> None:
+def test_fetch_index_ohlcv_frame_uses_pykrx(monkeypatch) -> None:
     calls: list[str] = []
+
+    def _mock_load_fdr() -> type:
+        class _Fdr:
+            @staticmethod
+            def DataReader(symbol: str, start: str, end: str):  # noqa: ANN001,ANN204
+                assert symbol == "^KS11"
+                assert start == "2026-03-01"
+                assert end == "2026-03-06"
+                return None
+
+        return _Fdr
+
+    class DummyStock:
+        @staticmethod
+        def get_index_ohlcv_by_date(start, end, code, name_display=False):  # noqa: ANN001
+            calls.append(code)
+            _ = (start, end)
+            return frame
+
     frame = pd.DataFrame(
         {
-            "Open": [1.0],
-            "High": [2.0],
-            "Low": [0.5],
-            "Close": [1.5],
-            "Volume": [10],
+            "시가": [1.0],
+            "고가": [2.0],
+            "저가": [0.5],
+            "종가": [1.5],
+            "거래량": [10],
         },
         index=pd.to_datetime(["2026-03-06"]),
     )
 
-    class DummyFdrModule:
-        @staticmethod
-        def DataReader(symbol, start, end):  # noqa: N802
-            calls.append(symbol)
-            _ = (start, end)
-            return frame
-
-    monkeypatch.setattr("eit_market_data.kr.market_helpers._load_fdr", lambda: DummyFdrModule())
-
-    result, source = fetch_index_ohlcv_frame("1001", date(2026, 3, 1), date(2026, 3, 6))
-
-    assert source == "fdr"
-    assert result is not None and not result.empty
-    assert calls == ["^KS11"]
-
-
-def test_fetch_market_cap_frame_raises_on_unexpected_columns(monkeypatch) -> None:
-    class DummyFdrModule:
-        @staticmethod
-        def StockListing(*args, **kwargs):  # noqa: ANN001, ANN205
-            return pd.DataFrame({"Code": ["005930"], "foo": [1]})
-
-    monkeypatch.setattr("eit_market_data.kr.market_helpers._load_fdr", lambda: DummyFdrModule())
+    monkeypatch.setattr("eit_market_data.kr.market_helpers._load_fdr", _mock_load_fdr)
     monkeypatch.setattr(
-        "eit_market_data.kr.market_helpers._load_local_market_cap_snapshot",
-        lambda as_of, market: None,
+        "eit_market_data.kr.market_helpers.install_pykrx_krx_session_hooks",
+        lambda: None,
     )
     monkeypatch.setattr(
         "eit_market_data.kr.market_helpers.ensure_krx_authenticated_session",
-        lambda interactive=False: None,
+        lambda interactive: None,
+    )
+    monkeypatch.setattr(
+        "eit_market_data.kr.pykrx_loader.load_pykrx_stock",
+        lambda: DummyStock,
     )
 
+    result, source = fetch_index_ohlcv_frame("1001", date(2026, 3, 1), date(2026, 3, 6))
+
+    assert source == "pykrx"
+    assert result is not None and not result.empty
+    assert calls == ["1001"]
+
+
+def test_fetch_market_cap_frame_raises_on_unexpected_columns(monkeypatch) -> None:
+    from datetime import timedelta
+
+    class DummyStock:
+        @staticmethod
+        def get_market_cap(*args, **kwargs):  # noqa: ANN001, ANN205
+            return pd.DataFrame({"foo": [1]}, index=pd.Index(["005930"], name="티커"))
+
+    monkeypatch.setattr("eit_market_data.kr.market_helpers.CAP_DAILY_DIR", Path("/tmp/does-not-exist"))
+    monkeypatch.setattr(
+        "eit_market_data.kr.market_helpers._load_fdr",
+        lambda: type("_Fdr", (), {"StockListing": staticmethod(lambda *args, **kwargs: pd.DataFrame())})(),
+    )
+    monkeypatch.setattr("eit_market_data.kr.market_helpers.install_pykrx_krx_session_hooks", lambda: None)
+    monkeypatch.setattr("eit_market_data.kr.market_helpers.ensure_krx_authenticated_session", lambda interactive: None)
+    monkeypatch.setattr(
+        "eit_market_data.kr.pykrx_loader.load_pykrx_stock",
+        lambda: DummyStock,
+    )
+
+    as_of = date.today() - timedelta(days=1)
+
     try:
-        fetch_market_cap_frame(date.today(), "KOSPI")
+        fetch_market_cap_frame(as_of, "KOSPI")
     except RuntimeError as exc:
         assert "unexpected columns" in str(exc)
     else:
@@ -165,34 +196,66 @@ def test_fetch_market_cap_frame_uses_previous_local_trading_day(tmp_path, monkey
     assert int(result.loc["005930", "종가"]) == 70200
 
 
-def test_fetch_market_cap_frame_returns_none_for_old_dates_without_local_snapshot(
+def test_fetch_market_cap_frame_uses_pykrx_for_recent_dates_when_fdr_fails(
     tmp_path,
     monkeypatch,
 ) -> None:
+    frame = pd.DataFrame(
+        {
+            "종가": [70000],
+            "시가총액": [420000000000000],
+            "거래량": [100],
+            "거래대금": [7000000],
+            "상장주식수": [5960000000],
+        },
+        index=pd.Index(["005930"], name="티커"),
+    )
+
+    class DummyStock:
+        @staticmethod
+        def get_market_cap(date_str, market):  # noqa: ANN001
+            assert market == "KOSPI"
+            assert date_str == as_of.strftime("%Y%m%d")
+            return frame
+
+    from datetime import timedelta
+
+    as_of = date.today() - timedelta(days=10)
+
     monkeypatch.setattr("eit_market_data.kr.market_helpers.CAP_DAILY_DIR", tmp_path)
     monkeypatch.setattr(
         "eit_market_data.kr.market_helpers._load_fdr",
-        lambda: (_ for _ in ()).throw(AssertionError("should not load fdr")),
+        lambda: type("_Fdr", (), {"StockListing": staticmethod(lambda *args, **kwargs: pd.DataFrame())})(),
+    )
+    monkeypatch.setattr("eit_market_data.kr.market_helpers.install_pykrx_krx_session_hooks", lambda: None)
+    monkeypatch.setattr("eit_market_data.kr.market_helpers.ensure_krx_authenticated_session", lambda interactive: None)
+    monkeypatch.setattr(
+        "eit_market_data.kr.pykrx_loader.load_pykrx_stock",
+        lambda: DummyStock,
     )
 
-    assert fetch_market_cap_frame(date(2024, 1, 31), "KOSPI") is None
+    result = fetch_market_cap_frame(as_of, "KOSPI")
+
+    assert result is not None
+    assert int(result.loc["005930", "시가총액"]) == 420000000000000
 
 
-def test_fetch_live_sector_classification_map_uses_krx_desc_industry(monkeypatch) -> None:
-    class DummyFdrModule:
+def test_fetch_live_sector_classification_map_uses_fdr_desc(monkeypatch) -> None:
+    class DummyFdr:
         @staticmethod
-        def StockListing(market):  # noqa: N802
+        def StockListing(market: str) -> pd.DataFrame:
             assert market == "KRX-DESC"
             return pd.DataFrame(
                 {
-                    "Code": ["005930", "247540", "000660"],
-                    "Market": ["KOSPI", "KOSDAQ GLOBAL", "KOSPI"],
-                    "Industry": ["통신 및 방송 장비 제조업", "일차전지 및 이차전지 제조업", "반도체 제조업"],
-                    "Sector": ["", "우량기업부", ""],
+                    "Code": ["247540"],
+                    "Market": ["KOSDAQ"],
+                    "Industry": ["일차전지 및 이차전지 제조업"],
+                    "Sector": ["TestSector"],
+                    "ListingDate": ["1975-06-11"],
                 }
             )
 
-    monkeypatch.setattr("eit_market_data.kr.market_helpers._load_fdr", lambda: DummyFdrModule())
+    monkeypatch.setattr("eit_market_data.kr.market_helpers._load_fdr", lambda: DummyFdr())
 
     sector_map, query_day = fetch_live_sector_classification_map("KOSDAQ", date(2026, 3, 12))
 

@@ -80,8 +80,9 @@ python scripts/build_kr_snapshot.py --profile ci_safe --as-of $(date +%Y-%m-%d)
 
 ## KRX 로그인 세션 (`KRX Data Marketplace`)
 
-기본 KR 런타임은 public `FinanceDataReader` 경로를 사용하므로 KRX 로그인 세션이 없어도 동작합니다.
-이 세션은 현재 **수동 진단/비교용**입니다.
+기본 KR 런타임 공식 경로는 pykrx입니다. DART/ECOS는 보강 데이터 소스이며,
+`profile ci_safe`는 FDR 진단 흐름/오프라인 fallback 모드로 유지됩니다.
+이 로그인 세션은 수동 진단/실험용으로만 남아 있습니다.
 
 이 프로젝트는 로컬/WSL 기준으로 아래 스크립트로 KRX 세션 쿠키를 생성합니다:
 
@@ -89,7 +90,7 @@ python scripts/build_kr_snapshot.py --profile ci_safe --as-of $(date +%Y-%m-%d)
 python scripts/krx_login.py
 ```
 
-Windows에서 repo를 직접 열어 한 번에 setup + 로그인 + FDR probe까지 실행하려면:
+Windows에서 repo를 직접 열어 한 번에 setup + 로그인 + probe까지 실행하려면:
 
 ```powershell
 scripts\windows_krx_setup_and_probe.cmd
@@ -111,9 +112,11 @@ powershell -ExecutionPolicy Bypass -File scripts\windows_krx_setup_and_probe.ps1
 
 - Chromium 브라우저가 열리면 KRX Data Marketplace에 직접 로그인
 - 로그인 완료 후 `JSESSIONID` 등 세션 쿠키를 JSON으로 저장
-- 이후 `probe_fdr_krx_session.py` 같은 수동 진단 스크립트에서 재사용
+- 이후 FDR fallback/legacy 수동 진단 스크립트에서 재사용
 
-기본 배치와 snapshot build는 이 세션을 전제로 하지 않습니다.
+기본 배치와 snapshot build는 FDR 경로가 아닌 공식 경로(pykrx)로 진행되며,
+필요 시 FDR fallback crawler(`crawl_kr_data_fallback.py`)를 보완용으로 사용합니다.
+`scripts/crawl_kr_data.py`는 인증 기반 복구/수동 진단용 legacy 경로입니다.
 
 주의사항:
 

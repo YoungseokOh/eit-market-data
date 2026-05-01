@@ -24,5 +24,4 @@
 
 - Official KRX login is local/WSL or self-hosted only.
 - Do not route GitHub-hosted CI back to browser-authenticated pykrx.
-- Keep Yahoo fallback as non-default and avoid reintroducing it as the primary path.
-
+- Keep fallback/retry paths scoped to recovery only and avoid promoting them to the default CI path.
