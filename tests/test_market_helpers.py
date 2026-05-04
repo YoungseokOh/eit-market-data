@@ -10,7 +10,13 @@ from eit_market_data.kr.market_helpers import (
     fetch_live_sector_classification_map,
     fetch_market_cap_frame,
     load_sector_snapshot_map,
+    normalize_ticker,
 )
+
+
+def test_normalize_ticker_preserves_six_character_krx_codes() -> None:
+    assert normalize_ticker("0126Z0") == "0126Z0"
+    assert normalize_ticker(" 005930 ") == "005930"
 
 
 def test_load_sector_snapshot_map_uses_index_as_ticker_column(tmp_path, monkeypatch) -> None:
@@ -256,6 +262,10 @@ def test_fetch_live_sector_classification_map_uses_fdr_desc(monkeypatch) -> None
             )
 
     monkeypatch.setattr("eit_market_data.kr.market_helpers._load_fdr", lambda: DummyFdr())
+    monkeypatch.setattr(
+        "eit_market_data.kr.pykrx_loader.load_pykrx_stock",
+        lambda: (_ for _ in ()).throw(ImportError("skip pykrx in fallback test")),
+    )
 
     sector_map, query_day = fetch_live_sector_classification_map("KOSDAQ", date(2026, 3, 12))
 

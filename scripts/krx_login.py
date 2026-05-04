@@ -4,17 +4,23 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
+
+from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
+load_dotenv(PROJECT_ROOT / ".env")
+
 from eit_market_data.kr.krx_auth import (
     check_krx_auth,
     ensure_krx_authenticated_session,
+    has_krx_env_credentials,
     resolve_cookie_path,
     resolve_profile_dir,
 )
@@ -53,7 +59,16 @@ def main() -> None:
     cookie_path = resolve_cookie_path(args.cookie_path, profile_dir)
     print(f"[INFO] profile_dir={profile_dir}")
     print(f"[INFO] cookie_path={cookie_path}")
-    print("[INFO] Complete the KRX login in the opened Chromium window.")
+    if has_krx_env_credentials():
+        print("[INFO] KRX_ID/KRX_PW found in .env or environment; auto-login will be attempted.")
+        print("[INFO] If KRX asks for extra verification, complete it in the opened Chromium window.")
+    else:
+        print("[INFO] Complete the KRX login in the opened Chromium window.")
+    if os.environ.get("WSL_DISTRO_NAME") or os.environ.get("WSL_INTEROP"):
+        print(
+            "[INFO] WSL detected. If the Chromium window does not appear, "
+            "run scripts/windows_krx_setup_and_probe.cmd from Windows PowerShell or cmd."
+        )
 
     session = ensure_krx_authenticated_session(
         interactive=True,

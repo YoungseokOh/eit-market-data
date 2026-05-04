@@ -33,16 +33,21 @@ https://opendart.fss.or.kr/uss/umt/EgovMberInsertView.do
 
 `opendart.fss.or.kr`는 짧은 시간 내 대량 연결 시도를 IP 단위로 임시 차단한다.
 
-**증상**: `Connection reset by peer` / `RemoteDisconnected` / `curl: (56)` / HTTP 000
+**증상**: `Connection reset by peer` / `RemoteDisconnected` / `ConnectTimeout` / `curl: (56)` / HTTP 000
 **원인**: 디버깅이나 테스트 목적으로 수십 회 연속 요청 → KT 망 IP 당일 차단
 **해제**: 자정(00:00 KST) 이후 자동 해제
 **주의**: WSL2와 같은 외부 IP를 쓰는 Windows Python도 동시에 차단됨
 
 **대응 원칙**:
 1. 접속 확인은 **1회**만 시도한다. 실패해도 재시도하지 않는다.
-2. 차단 시 `python scripts/seed_dart_cache.py` 로 기존 스냅샷에서 캐시를 시딩한다.
-3. 캐시 시딩 후 `--profile ci_safe` 빌드는 DART 없이도 동작한다.
-4. 뚫으려 하지 않는다. 자정까지 기다리거나 GitHub Actions를 사용한다.
+2. KOSPI200/전체 종목을 live DART로 한 번에 넓게 돌리지 않는다.
+3. live DART는 `explicit universe + cached ticker skip + 5s+ delay + progress/resume + transient 즉시 중단`
+   형태의 cache backfill에만 사용한다.
+4. 차단 시 `python scripts/seed_dart_cache.py` 로 기존 스냅샷에서 캐시를 시딩한다.
+5. 캐시 시딩 후 `--profile ci_safe` 빌드는 DART 없이도 동작한다.
+6. local KOSPI200 수집 중이면 `--resume --dart-mode cache_only`로 전환한다.
+7. `progress.json` 완료만 믿지 않는다. 실제 `data/dart_cache/` key coverage를 확인한다.
+8. 뚫으려 하지 않는다. 자정까지 기다리거나 GitHub Actions를 사용한다.
 
 ```bash
 # 접속 상태 단일 확인 (딱 1번만)
@@ -53,7 +58,48 @@ curl -s --max-time 10 \
 # 차단 상태일 때 오프라인 빌드
 python scripts/seed_dart_cache.py
 python scripts/build_kr_snapshot.py --profile ci_safe --as-of $(date +%Y-%m-%d)
+
+# local KOSPI200 수집 중 live DART timeout이 난 경우
+python scripts/run_local_collection.py \
+  --storage-root out/<label> \
+  --as-of YYYY-MM-DD \
+  --market kr \
+  --phase full \
+  --full-universe-kind kospi200 \
+  --start YYYY-01-01 \
+  --resume \
+  --dart-mode cache_only
+
+# DART cache coverage를 안전하게 보강할 때만 사용
+python scripts/backfill_dart_cache_controlled.py \
+  --universe-csv out/<label>/runs/YYYY-MM-DD/kr_full_kospi200/universes/kr/kospi200/YYYY-MM.csv \
+  --as-of YYYY-MM-DD \
+  --progress out/<label>/runs/YYYY-MM-DD/kr_full_kospi200/dart_cache_backfill_progress.json \
+  --delay 5 \
+  --quarters 8
 ```
+
+`cache_only` 모드는 OpenDART 네트워크를 더 호출하지 않고 `data/dart_cache/`만 읽는다.
+가격, 시가총액, 섹터, 벤치마크는 KRX/pykrx로 계속 채울 수 있지만,
+DART 재무 분기와 공시 텍스트 coverage는 캐시에 있는 범위로 제한된다.
+따라서 완료 보고에서는 `fundamental_tickers`/`filing_tickers`가 아니라
+`quarters_nonempty`와 `filing_text_nonempty`를 별도로 확인한다.
+controlled backfill 중 `DART fundamentals returned empty`가 나오면 반복 `013` 가능성이
+있으므로 live 호출을 중단한다. 기본 `--filing-mode optional`에서
+`DART filing returned empty`는 `filing_empty`로 기록하고 계속한다. filing text가 hard gate인
+검증에서만 `--filing-mode strict`를 쓴다.
+최신 `[첨부정정]사업보고서`가 OpenDART document API에서 `014 파일이 존재하지 않습니다`를
+반환하면 provider는 같은 `as_of` 이전의 다음 retrievable 사업보고서로 내려간다.
+따라서 filing coverage 보고에는 실제 cache 존재 여부와 `filing_date`를 같이 본다.
+실수 방지: `014`는 최신 첨부정정 문서 본문이 비어 있다는 뜻일 수 있으며, filing 자체가
+없다는 뜻으로 바로 분류하지 않는다. 같은 `as_of` 이전 후보와 `doc:<rcept_no>` cache를
+확인한 뒤 결측 여부를 판단한다.
+
+DART cache는 `diskcache` 기반이며 기본 size limit은 50GB다.
+`EIT_DART_CACHE_SIZE_LIMIT_BYTES`로 더 크게 조정할 수 있지만, 운영 보고에서는 항상
+현재 `cache.size_limit`, `cache.volume()`, target month의 `missing_fundamental`,
+`missing_filing`, `latest_quarter_distribution`을 같이 확인한다. progress가 `completed`여도
+cache limit이 작으면 evict 때문에 실제 key가 빠질 수 있다.
 
 ---
 
@@ -90,6 +136,26 @@ python scripts/build_kr_snapshot.py --profile ci_safe --as-of $(date +%Y-%m-%d)
 python scripts/krx_login.py
 ```
 
+`.env` 또는 셸 환경에 아래 값이 있으면 최신 `pykrx`는 자체 `KRXSession`으로
+비대화형 로그인을 먼저 시도합니다. 이 경로가 성공하면 Chromium 창 없이도 probe가 통과합니다.
+보안문자나 추가 인증이 필요한 경우에만 Chromium/manual 흐름이 fallback으로 필요합니다.
+
+```dotenv
+KRX_ID=your_krx_id
+KRX_PW=your_krx_password
+```
+
+official raw collector인 `scripts/crawl_kr_data_pykrx.py`도 이 값을 필요로 합니다.
+entrypoint가 `.env`를 로드하지 않거나 shell에 값이 없으면 pykrx 인증 실패가 아래처럼
+schema 문제처럼 보일 수 있습니다:
+
+- `None of [Index(['종가', '시가총액', ...])] are in the [columns]`
+- `None of [Index(['BPS', 'PER', ...])] are in the [columns]`
+- `KeyError('지수명')`
+
+이 경우 dataframe normalizer를 먼저 고치지 말고, `.env` 로드와 `KRX_ID`/`KRX_PW`
+존재 여부를 확인한 뒤 `python scripts/preflight_kr_data.py --as-of YYYY-MM-DD --ticker 005930 --skip-news`를 실행합니다.
+
 Windows에서 repo를 직접 열어 한 번에 setup + 로그인 + probe까지 실행하려면:
 
 ```powershell
@@ -110,6 +176,7 @@ powershell -ExecutionPolicy Bypass -File scripts\windows_krx_setup_and_probe.ps1
 
 사용 목적:
 
+- `pykrx` 내장 인증 세션이 `.env`의 `KRX_ID/KRX_PW`로 동작하는지 확인
 - Chromium 브라우저가 열리면 KRX Data Marketplace에 직접 로그인
 - 로그인 완료 후 `JSESSIONID` 등 세션 쿠키를 JSON으로 저장
 - 이후 FDR fallback/legacy 수동 진단 스크립트에서 재사용
@@ -124,6 +191,8 @@ powershell -ExecutionPolicy Bypass -File scripts\windows_krx_setup_and_probe.ps1
 - 쿠키 파일은 비밀정보이므로 외부 공유 금지
 - 쿠키 파일을 저장소나 커밋에 포함하지 말 것
 - 현재 1차 구현은 로컬/WSL 우선이며, GitHub Actions 무인 로그인은 범위 밖
+- 최신 `pykrx` 인증 모듈이 있을 때는 레거시 `webio.Get/Post` monkey-patch를 설치하지 말 것.
+  그 훅이 정상 인증 세션을 우회하면 `status=400 LOGOUT`이 날 수 있다.
 
 ---
 

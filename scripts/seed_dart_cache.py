@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+# ruff: noqa: E402
 """Seed the DART diskcache from existing snapshot JSON files.
 
 When opendart.fss.or.kr is inaccessible (e.g. WSL2 IP block), DartProvider
@@ -27,7 +29,12 @@ from dotenv import load_dotenv
 load_dotenv(PROJECT_ROOT / ".env")
 
 import diskcache
-from eit_market_data.kr.dart_provider import _DART_CACHE_DIR, _DOC_TTL, _FINSTATE_TTL
+from eit_market_data.kr.dart_provider import (
+    _DART_CACHE_DIR,
+    _DART_CACHE_SIZE_LIMIT,
+    _DOC_TTL,
+    _FINSTATE_TTL,
+)
 from eit_market_data.schemas.snapshot import FilingData, FundamentalData
 
 
@@ -52,7 +59,7 @@ def seed(snapshots_dir: Path | list[Path]) -> None:
 
 def seed_into_cache(snapshots_dir: Path, cache_dir: Path) -> None:
     cache_dir.mkdir(parents=True, exist_ok=True)
-    cache = diskcache.Cache(str(cache_dir))
+    cache = diskcache.Cache(str(cache_dir), size_limit=_DART_CACHE_SIZE_LIMIT)
 
     snapshots = _load_snapshots(snapshots_dir)
     if not snapshots:

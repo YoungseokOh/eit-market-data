@@ -1,3 +1,4 @@
+# ruff: noqa: E402
 from __future__ import annotations
 
 import argparse
@@ -68,6 +69,7 @@ async def build_snapshot(
         month,
         tickers,
         SnapshotConfig(artifacts_dir=str(effective_root)),
+        decision_date=as_of,
     )
 
     snapshot_dir = effective_root / "snapshots" / month
@@ -107,7 +109,6 @@ def _summary_payload(
     artifacts_root: Path,
     field_coverage: dict[str, Any] | None = None,
 ) -> dict[str, object]:  # noqa: ANN001
-    coverage = field_coverage or _field_coverage(snapshot)
     snapshot_dir = artifacts_root / "snapshots" / month
     return {
         "status": "ok",
@@ -130,6 +131,11 @@ def _summary_payload(
 def _field_coverage(snapshot) -> dict[str, Any]:  # noqa: ANN001, ANN401
     universe_size = len(snapshot.universe)
     fundamentals = list(snapshot.fundamentals.values())
+    issued_shares = sum(
+        1
+        for item in fundamentals
+        if any(quarter.issued_shares is not None for quarter in item.quarters)
+    )
     return {
         "universe_size": universe_size,
         "prices": sum(1 for bars in snapshot.prices.values() if bars),
@@ -141,6 +147,7 @@ def _field_coverage(snapshot) -> dict[str, Any]:  # noqa: ANN001, ANN401
         ),
         "last_close_price": sum(1 for item in fundamentals if item.last_close_price is not None),
         "market_cap": sum(1 for item in fundamentals if item.market_cap is not None),
+        "issued_shares": issued_shares,
         "sector_map": len(snapshot.sector_map),
         "benchmark_bars": len(snapshot.benchmark_prices),
     }
@@ -158,6 +165,8 @@ def _manifest_warnings(profile: str, coverage: dict[str, Any]) -> list[str]:
         )
     if coverage.get("market_cap", 0) == 0:
         warnings.append("market_cap coverage is zero")
+    if coverage.get("issued_shares", 0) == 0:
+        warnings.append("issued_shares coverage is zero")
     if coverage.get("benchmark_bars", 0) == 0:
         warnings.append("benchmark coverage is zero")
     return warnings

@@ -217,7 +217,9 @@ async def _check_dart(as_of: date, ticker: str) -> CheckResult:
         return CheckResult("dart", "failed", "DART_API_KEY missing")
 
     try:
-        provider = CompositeKrFundamentalProvider()
+        provider = CompositeKrFundamentalProvider(
+            price_provider=PykrxProvider(official_only=True)
+        )
         fundamentals = await provider.fetch_fundamentals(ticker, as_of, n_quarters=4)
     except Exception as exc:
         return CheckResult("dart", "failed", str(exc))

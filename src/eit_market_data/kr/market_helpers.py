@@ -43,7 +43,10 @@ def date_to_yyyymmdd(value: date) -> str:
 
 def normalize_ticker(ticker: str) -> str:
     """Normalize a ticker to a 6-digit KRX stock code."""
-    digits = "".join(ch for ch in str(ticker) if ch.isdigit())
+    raw = str(ticker).strip().upper()
+    if len(raw) == 6 and raw.isalnum() and any(ch.isalpha() for ch in raw):
+        return raw
+    digits = "".join(ch for ch in raw if ch.isdigit())
     return digits.zfill(6) if digits else str(ticker)
 
 
@@ -335,7 +338,12 @@ def _load_local_monthly_cap_snapshot(
     return frame.set_index("종목코드", drop=True)
 
 
-def fetch_market_cap_frame(as_of: date, market: str) -> Any | None:
+def fetch_market_cap_frame(
+    as_of: date,
+    market: str,
+    *,
+    use_local: bool = True,
+) -> Any | None:
     """Fetch market-cap snapshot.
 
     Fallback order:
@@ -343,7 +351,7 @@ def fetch_market_cap_frame(as_of: date, market: str) -> Any | None:
     2. pykrx KRX authenticated endpoint
     3. FDR public StockListing (diagnostic)
     """
-    local_frame = _load_local_market_cap_snapshot(as_of, market)
+    local_frame = _load_local_market_cap_snapshot(as_of, market) if use_local else None
     if local_frame is not None and not local_frame.empty:
         return local_frame
 

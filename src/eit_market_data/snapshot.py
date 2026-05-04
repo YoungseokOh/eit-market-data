@@ -74,7 +74,6 @@ def create_kr_providers(
         FdrBenchmarkProvider,
         FdrNaverPriceProvider,
         NullDartProvider,
-        NullBenchmarkProvider,
         NullMacroProvider,
         SeedSectorProvider,
     )
@@ -150,6 +149,14 @@ def _first_business_day(year: int, month: int) -> date:
     return first
 
 
+def _next_business_day(value: date) -> date:
+    """Return the next weekday after the given date."""
+    next_day = value + timedelta(days=1)
+    while next_day.weekday() >= 5:
+        next_day += timedelta(days=1)
+    return next_day
+
+
 def _next_month(year: int, month: int) -> tuple[int, int]:
     """Return (year, month) for the next calendar month."""
     if month == 12:
@@ -216,6 +223,7 @@ class SnapshotBuilder:
         month: str,
         universe: list[str],
         config: SnapshotConfig | None = None,
+        decision_date: date | None = None,
     ) -> MonthlySnapshot:
         """Build a complete point-in-time snapshot for a given month.
 
@@ -223,15 +231,21 @@ class SnapshotBuilder:
             month: Decision month in "YYYY-MM" format.
             universe: List of tickers in the investment universe.
             config: Full configuration.
+            decision_date: Optional explicit decision date for partial-month
+                local runs. Defaults to the month's last business day.
 
         Returns:
             Frozen MonthlySnapshot.
         """
         config = config or SnapshotConfig()
         year, mon = int(month[:4]), int(month[5:7])
-        decision_date = _last_business_day(year, mon)
-        ny, nm = _next_month(year, mon)
-        execution_date = _first_business_day(ny, nm)
+        if decision_date is None:
+            decision_date = _last_business_day(year, mon)
+        elif decision_date.strftime("%Y-%m") != month:
+            raise ValueError(
+                f"decision_date {decision_date.isoformat()} is outside snapshot month {month}"
+            )
+        execution_date = _next_business_day(decision_date)
 
         # Throttle concurrent API calls to avoid rate limits
         sem = asyncio.Semaphore(32)
@@ -334,9 +348,10 @@ class SnapshotBuilder:
         month: str,
         universe: list[str],
         config: SnapshotConfig | None = None,
+        decision_date: date | None = None,
     ) -> MonthlySnapshot:
         """Build snapshot and save metadata to artifacts."""
-        snapshot = await self.build(month, universe, config)
+        snapshot = await self.build(month, universe, config, decision_date=decision_date)
 
         artifacts_root = config.artifacts_dir if config is not None else "artifacts"
         artifacts_dir = Path(artifacts_root) / "snapshots" / month

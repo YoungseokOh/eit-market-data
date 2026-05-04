@@ -18,6 +18,7 @@ env/
 # Local data (too large for git)
 data/
 artifacts/
+out/
 
 # Secrets
 .env

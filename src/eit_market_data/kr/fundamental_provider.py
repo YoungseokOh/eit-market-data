@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from datetime import date
 from typing import Any
 
@@ -42,6 +43,7 @@ class CompositeKrFundamentalProvider:
         self._use_market_snapshot = use_market_snapshot
         self._raise_on_error = raise_on_error
         self._market_cap_cache: dict[str, Any] = {}
+        self._market_cap_cache_lock = threading.Lock()
         self._semaphore = asyncio.Semaphore(16)
         # Cache final FundamentalData by (ticker, as_of) so sector_avg_tasks
         # that call fetch_fundamentals() a second time get instant hits.
@@ -85,6 +87,17 @@ class CompositeKrFundamentalProvider:
                     raise
                 return FundamentalData(ticker=norm_ticker)
 
+            if market_snapshot.get("issued_shares") is None:
+                issued_shares = await self._fetch_dart_issued_shares(norm_ticker, as_of)
+                last_close = (
+                    market_snapshot.get("last_close_price")
+                    or price_snapshot.get("last_close_price")
+                )
+                if issued_shares is not None:
+                    market_snapshot["issued_shares"] = issued_shares
+                    if market_snapshot.get("market_cap") is None and last_close:
+                        market_snapshot["market_cap"] = float(last_close) * issued_shares
+
         result = self._merge_fundamentals(dart_fundamentals, market_snapshot, price_snapshot)
         self._fundamentals_cache[key] = result
         return result
@@ -120,8 +133,13 @@ class CompositeKrFundamentalProvider:
         market_cap = None
         issued_shares = None
         frame = self._market_cap_frame(effective_as_of)
+        row = None
         if frame is not None and ticker in frame.index:
             row = frame.loc[ticker]
+        elif self._use_market_snapshot:
+            row = self._fetch_remote_market_cap_row(ticker, effective_as_of)
+
+        if row is not None:
             cap_val = row.get("시가총액", 0) or 0
             shares_val = row.get("상장주식수", 0) or 0
             market_cap = float(cap_val) if cap_val else None
@@ -135,7 +153,9 @@ class CompositeKrFundamentalProvider:
 
     def _market_cap_frame(self, trade_date: date):  # noqa: ANN202
         cache_key = date_to_yyyymmdd(trade_date)
-        if cache_key not in self._market_cap_cache:
+        with self._market_cap_cache_lock:
+            if cache_key in self._market_cap_cache:
+                return self._market_cap_cache[cache_key]
             frames: list[Any] = []
             for market in ("KOSPI", "KOSDAQ"):
                 try:
@@ -147,15 +167,55 @@ class CompositeKrFundamentalProvider:
                 normalized = frame.copy()
                 normalized.index = normalized.index.map(lambda value: normalize_ticker(str(value)))
                 frames.append(normalized)
-            self._market_cap_cache[cache_key] = None
+            result = None
             if frames:
                 try:
                     import pandas as pd
 
-                    self._market_cap_cache[cache_key] = pd.concat(frames)
+                    result = pd.concat(frames)
                 except Exception:
-                    self._market_cap_cache[cache_key] = frames[0]
-        return self._market_cap_cache[cache_key]
+                    result = frames[0]
+            self._market_cap_cache[cache_key] = result
+            return result
+
+    def _fetch_remote_market_cap_row(self, ticker: str, as_of: date):  # noqa: ANN202
+        for market in ("KOSPI", "KOSDAQ"):
+            try:
+                frame = fetch_market_cap_frame(as_of, market, use_local=False)
+            except Exception:
+                frame = None
+            if frame is None or frame.empty:
+                continue
+
+            normalized = frame.copy()
+            if "종목코드" in normalized.columns:
+                normalized["종목코드"] = normalized["종목코드"].map(
+                    lambda value: normalize_ticker(str(value))
+                )
+                normalized = normalized.set_index("종목코드", drop=True)
+            else:
+                normalized.index = normalized.index.map(
+                    lambda value: normalize_ticker(str(value))
+                )
+
+            if ticker in normalized.index:
+                return normalized.loc[ticker]
+        return None
+
+    async def _fetch_dart_issued_shares(
+        self,
+        ticker: str,
+        as_of: date,
+    ) -> float | None:
+        fetcher = getattr(self._dart, "fetch_issued_shares", None)
+        if not callable(fetcher):
+            return None
+        try:
+            value = await fetcher(ticker, as_of)
+        except Exception as exc:
+            logger.warning("DART issued shares fallback failed for %s: %s", ticker, exc)
+            return None
+        return float(value) if value else None
 
     def _merge_fundamentals(
         self,

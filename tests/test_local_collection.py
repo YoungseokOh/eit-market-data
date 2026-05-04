@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import json
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -7,12 +9,19 @@ import pandas as pd
 
 from eit_market_data.kr.news_catalog import KrNewsWindowCoverage
 from eit_market_data.kr.naver_news_provider import NaverArchiveNewsRecord
+import eit_market_data.local_collection as local_collection
 from eit_market_data.local_collection import (
+    CheckpointPolicy,
+    KrCollectionState,
     ValidationCheck,
+    _next_kr_execution_date,
+    _run_kr_phase,
     _is_sorted_dates,
+    _is_dart_transient_error,
     build_local_universe_manifest,
     build_run_root,
     summarize_checks,
+    validate_kr_checkpoint,
     validate_kr_final_snapshot,
 )
 from eit_market_data.schemas.snapshot import (
@@ -22,6 +31,7 @@ from eit_market_data.schemas.snapshot import (
     MonthlySnapshot,
     NewsItem,
     PriceBar,
+    QuarterlyFinancials,
     SectorAverages,
     SnapshotMetadata,
 )
@@ -66,6 +76,188 @@ def test_build_run_root_is_stable() -> None:
         full_universe_kind="top300",
     )
     assert str(path) == "/tmp/storage/runs/2026-03-31/both_all_top300"
+
+
+def test_next_kr_execution_date_uses_krx_business_day(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "eit_market_data.local_collection._krx_business_days_between",
+        lambda start, end: [date(2026, 5, 7), date(2026, 5, 8)],
+    )
+
+    assert _next_kr_execution_date(date(2026, 5, 4)) == date(2026, 5, 7)
+
+
+def test_next_kr_execution_date_falls_back_to_next_weekday(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "eit_market_data.local_collection._krx_business_days_between",
+        lambda start, end: [],
+    )
+
+    assert _next_kr_execution_date(date(2026, 5, 8)) == date(2026, 5, 11)
+
+
+def test_run_kr_phase_uses_official_pykrx_raw_crawler(monkeypatch, tmp_path: Path) -> None:
+    commands: list[list[str]] = []
+
+    def fake_run_subprocess_stage(*, name, command, log_path):  # noqa: ANN001
+        _ = (name, log_path)
+        commands.append(command)
+
+    class DummyCollector:
+        def __init__(self, **kwargs):  # noqa: ANN003
+            self.kwargs = kwargs
+
+        async def collect(self, *, universe_csv: Path, resume: bool):  # noqa: ANN001
+            _ = (universe_csv, resume)
+            return {"summary_path": "summary.json"}
+
+    monkeypatch.setattr(local_collection, "run_subprocess_stage", fake_run_subprocess_stage)
+    monkeypatch.setattr(
+        local_collection,
+        "validate_kr_raw_outputs",
+        lambda raw_root: [ValidationCheck("cap_daily", "ok", str(raw_root))],
+    )
+    monkeypatch.setattr(local_collection, "LocalKrCollector", DummyCollector)
+
+    run_root = tmp_path / "run"
+    universe_csv = tmp_path / "universe.csv"
+    universe_csv.write_text("ticker\n005930\n", encoding="utf-8")
+
+    asyncio.run(
+        _run_kr_phase(
+            stage_name="full",
+            as_of=date(2026, 5, 4),
+            raw_start=date(2026, 1, 1),
+            run_root=run_root,
+            universe_csv=universe_csv,
+            progress_path=run_root / "progress.json",
+            resume=False,
+            policy=CheckpointPolicy(every_tickers=25, every_seconds=600),
+            dart_mode="live",
+        )
+    )
+
+    assert len(commands) == 1
+    command = commands[0]
+    assert "scripts/crawl_kr_data_pykrx.py" in command
+    assert "scripts/crawl_kr_data_fallback.py" not in command
+    assert "--skip-meta" in command
+    assert "--skip-ohlcv" in command
+    assert "--universe-csv" not in command
+
+
+def test_local_kr_collector_skips_inter_ticker_delay_in_cache_only(tmp_path: Path) -> None:
+    collector = local_collection.LocalKrCollector(
+        as_of=date(2026, 5, 4),
+        storage_root=tmp_path,
+        bundle_root=tmp_path / "bundles",
+        partial_root=tmp_path / "partials",
+        checkpoint_root=tmp_path / "reports",
+        policy=CheckpointPolicy(every_tickers=25, every_seconds=600),
+        progress_path=tmp_path / "progress.json",
+        dart_mode="cache_only",
+    )
+
+    assert collector.inter_ticker_delay_seconds == 0.0
+
+
+def test_local_kr_collector_keeps_inter_ticker_delay_for_live_dart(tmp_path: Path) -> None:
+    collector = local_collection.LocalKrCollector(
+        as_of=date(2026, 5, 4),
+        storage_root=tmp_path,
+        bundle_root=tmp_path / "bundles",
+        partial_root=tmp_path / "partials",
+        checkpoint_root=tmp_path / "reports",
+        policy=CheckpointPolicy(every_tickers=25, every_seconds=600),
+        progress_path=tmp_path / "progress.json",
+        dart_mode="live",
+    )
+
+    assert collector.inter_ticker_delay_seconds == 4.0
+
+
+def test_validate_kr_checkpoint_degrades_missing_filing_text() -> None:
+    ticker = "012450"
+    checks = asyncio.run(
+        validate_kr_checkpoint(
+            state=KrCollectionState(
+                prices={
+                    ticker: [
+                        PriceBar(
+                            date=date(2026, 5, 4),
+                            open=1,
+                            high=1,
+                            low=1,
+                            close=1,
+                            volume=1,
+                        )
+                    ]
+                },
+                fundamentals={
+                    ticker: FundamentalData(
+                        ticker=ticker,
+                        quarters=[
+                            QuarterlyFinancials(
+                                fiscal_quarter="2025Q4",
+                                report_date=date(2026, 3, 10),
+                            )
+                        ],
+                    )
+                },
+                filings={ticker: FilingData(ticker=ticker)},
+            ),
+            as_of=date(2026, 5, 4),
+        )
+    )
+
+    filing_checks = [check for check in checks if check.name == f"kr:filing:{ticker}"]
+    assert len(filing_checks) == 1
+    assert filing_checks[0].status == "degraded"
+    assert filing_checks[0].detail == "missing_business_overview"
+
+
+def test_validate_kr_checkpoint_degrades_missing_quarters_with_market_fields() -> None:
+    ticker = "010120"
+    checks = asyncio.run(
+        validate_kr_checkpoint(
+            state=KrCollectionState(
+                prices={
+                    ticker: [
+                        PriceBar(
+                            date=date(2026, 5, 4),
+                            open=1,
+                            high=1,
+                            low=1,
+                            close=1,
+                            volume=1,
+                        )
+                    ]
+                },
+                fundamentals={
+                    ticker: FundamentalData(
+                        ticker=ticker,
+                        market_cap=1,
+                        last_close_price=1,
+                    )
+                },
+                filings={ticker: FilingData(ticker=ticker, business_overview="ok")},
+            ),
+            as_of=date(2026, 5, 4),
+        )
+    )
+
+    fundamental_checks = [
+        check for check in checks if check.name == f"kr:fundamentals:{ticker}"
+    ]
+    assert len(fundamental_checks) == 1
+    assert fundamental_checks[0].status == "degraded"
+    assert fundamental_checks[0].detail == "missing_quarters"
+
+
+def test_dart_transient_error_detection() -> None:
+    assert _is_dart_transient_error(RuntimeError("ConnectTimeoutError: timed out"))
+    assert _is_dart_transient_error(RuntimeError("Max retries exceeded with url"))
+    assert not _is_dart_transient_error(RuntimeError("DART fundamentals returned empty"))
 
 
 def test_validate_kr_final_snapshot_rejects_news_outside_target_window() -> None:
@@ -170,6 +362,7 @@ def test_is_sorted_dates_accepts_both_directions() -> None:
 
 
 def test_build_local_universe_manifest_top_kind_keeps_market_cap(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("eit_market_data.local_collection.PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(
         "eit_market_data.local_collection._listing_metadata_frame",
         lambda: pd.DataFrame(
@@ -204,3 +397,144 @@ def test_build_local_universe_manifest_top_kind_keeps_market_cap(monkeypatch, tm
     assert list(frame.columns) == ["ticker", "market", "sector", "name", "market_cap", "rank", "as_of"]
     assert frame["market_cap"].tolist() == [500.0, 300.0]
     assert frame["rank"].tolist() == [1, 2]
+
+
+def test_build_local_universe_manifest_uses_snapshot_market_cap_fallback(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr("eit_market_data.local_collection.PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(
+        "eit_market_data.local_collection._listing_metadata_frame",
+        lambda: pd.DataFrame(
+            [
+                {"ticker": "005930", "name": "삼성전자", "market": "KOSPI", "sector": "IT"},
+                {"ticker": "247540", "name": "에코프로비엠", "market": "KOSDAQ", "sector": "Materials"},
+            ]
+        ),
+    )
+
+    def fake_cap_frame(as_of, market):  # noqa: ANN001, ANN202
+        _ = as_of
+        if market == "KOSPI":
+            return pd.DataFrame(
+                {
+                    "종목코드": ["005930"],
+                    "시가총액": [500.0],
+                }
+            )
+        return pd.DataFrame(columns=["종목코드", "시가총액"])
+
+    snapshot_dir = tmp_path / "artifacts/kr/snapshots/2025-12"
+    snapshot_dir.mkdir(parents=True)
+    (snapshot_dir / "snapshot.json").write_text(
+        json.dumps(
+            {
+                "fundamentals": {
+                    "247540": {
+                        "market_cap": 900.0,
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr("eit_market_data.local_collection.fetch_market_cap_frame", fake_cap_frame)
+
+    output_path = tmp_path / "top200.csv"
+    build_local_universe_manifest(
+        as_of=date(2025, 12, 31),
+        kind="top200",
+        output_path=output_path,
+    )
+
+    frame = pd.read_csv(output_path, dtype={"ticker": str})
+    assert frame["ticker"].tolist() == ["247540", "005930"]
+    assert frame["market_cap"].tolist() == [900.0, 500.0]
+
+
+def test_build_local_universe_manifest_kospi200_uses_official_order(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        "eit_market_data.local_collection._listing_metadata_frame",
+        lambda: pd.DataFrame(
+            [
+                {"ticker": "005930", "name": "삼성전자", "market": "KOSPI", "sector": "IT"},
+                {"ticker": "0126Z0", "name": "삼성에피스홀딩스", "market": "KOSPI", "sector": "Healthcare"},
+            ]
+        ),
+    )
+    tickers = ["005930", "0126Z0"] + [f"{idx:06d}" for idx in range(1, 199)]
+    monkeypatch.setattr(
+        "eit_market_data.local_collection._fetch_kospi200_tickers_from_pykrx",
+        lambda as_of: tickers,
+    )
+
+    def fake_cap_frame(as_of, market):  # noqa: ANN001, ANN202
+        _ = as_of
+        assert market == "KOSPI"
+        return pd.DataFrame(
+            {
+                "종목코드": ["005930", "0126Z0"],
+                "종목명": ["삼성전자", "삼성에피스홀딩스"],
+                "시가총액": [500.0, 300.0],
+            }
+        )
+
+    monkeypatch.setattr("eit_market_data.local_collection.fetch_market_cap_frame", fake_cap_frame)
+
+    output_path = tmp_path / "kospi200.csv"
+    build_local_universe_manifest(
+        as_of=date(2025, 12, 31),
+        kind="kospi200",
+        output_path=output_path,
+    )
+
+    frame = pd.read_csv(output_path, dtype={"ticker": str})
+    assert len(frame) == 200
+    assert frame["ticker"].head(2).tolist() == ["005930", "0126Z0"]
+    assert frame["rank"].head(2).tolist() == [1, 2]
+    assert frame["source"].unique().tolist() == ["krx_pykrx"]
+    assert frame.loc[1, "market_cap"] == 300.0
+
+
+def test_build_local_universe_manifest_kospi200_falls_back_to_naver_current(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        "eit_market_data.local_collection._listing_metadata_frame",
+        lambda: pd.DataFrame(columns=["ticker", "name", "market", "sector"]),
+    )
+    monkeypatch.setattr(
+        "eit_market_data.local_collection._fetch_kospi200_tickers_from_pykrx",
+        lambda as_of: [],
+    )
+    rows = [{"ticker": "0126Z0", "name": "삼성에피스홀딩스"}] + [
+        {"ticker": f"{idx:06d}", "name": f"name-{idx}"}
+        for idx in range(1, 200)
+    ]
+    monkeypatch.setattr(
+        "eit_market_data.local_collection._fetch_kospi200_rows_from_naver_current",
+        lambda: rows,
+    )
+    monkeypatch.setattr(
+        "eit_market_data.local_collection.fetch_market_cap_frame",
+        lambda as_of, market: pd.DataFrame(columns=["종목코드", "시가총액"]),
+    )
+
+    output_path = tmp_path / "kospi200.csv"
+    build_local_universe_manifest(
+        as_of=date(2025, 12, 31),
+        kind="kospi200",
+        output_path=output_path,
+    )
+
+    frame = pd.read_csv(output_path, dtype={"ticker": str})
+    assert len(frame) == 200
+    assert frame.loc[0, "ticker"] == "0126Z0"
+    assert frame.loc[0, "name"] == "삼성에피스홀딩스"
+    assert frame["source"].unique().tolist() == ["naver_current_fallback"]

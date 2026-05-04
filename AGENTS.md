@@ -9,6 +9,9 @@ Repository-local guidance for coding agents working in this repo.
   official data source.
 - Do not assume KRX login is required for normal preflight or snapshot builds.
 - KRX login scripts (`scripts/krx_login.py`, `scripts/probe_fdr_krx_session.py`) are manual diagnostics only.
+- Official pykrx collection scripts must load project `.env` so `KRX_ID`/`KRX_PW` are visible.
+  Missing credentials can surface as misleading dataframe column errors (`종가`, `BPS`, `PER`,
+  `KeyError('지수명')`) rather than a clean auth exception.
 
 ## Historical Market Cap
 
@@ -24,6 +27,18 @@ Repository-local guidance for coding agents working in this repo.
 - `scripts/run_daily_batch.py` should use `scripts/crawl_kr_data_pykrx.py`, with fallback paths only when needed.
 - GitHub Actions should treat DART and ECOS keys as optional enrichment for KR, not as hard requirements for the base KR build.
 - Release/upload paths must match the actual batch output under `out/<run>/artifacts/snapshots/`.
+- Do not broad-run live DART for KOSPI200/all tickers. Use `scripts/backfill_dart_cache_controlled.py`
+  only with explicit universe, cached ticker skip, `5s+` delay, progress/resume, and immediate
+  stop on transient or empty fundamental DART results; then resume bundles with `--dart-mode cache_only`.
+- DART cache backfill must use the target bundle decision date as `--as-of`; a later cache month
+  must not be used to repair older point-in-time snapshots.
+- Filing text extraction misses are not the same as missing financial statements. Default
+  controlled backfill may record `filing_empty` and continue; use strict filing mode only when
+  filing text is a hard gate.
+- Treat controlled backfill progress as a resume checkpoint, not completion proof. Verify actual
+  `data/dart_cache/` key coverage, latest-quarter freshness, and cache size/volume before reporting
+  DART cache collection complete. DART diskcache defaults to 50GB and can be increased with
+  `EIT_DART_CACHE_SIZE_LIMIT_BYTES`.
 
 ## Docs
 

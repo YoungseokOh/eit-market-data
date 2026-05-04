@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
+import time
 from datetime import date, timedelta
 from typing import Any
 
@@ -75,7 +77,10 @@ _CASHFLOW_MAP: dict[str, str] = {
 }
 
 # Concurrency limiter for yfinance (avoid rate-limiting)
-_SEMAPHORE = asyncio.Semaphore(3)
+_SEMAPHORE = asyncio.Semaphore(1)
+_YF_THROTTLE_LOCK = threading.Lock()
+_YF_LAST_REQUEST_AT = 0.0
+_YF_MIN_REQUEST_INTERVAL_SECONDS = 1.0
 
 
 def _safe_float(val: Any) -> float | None:
@@ -95,6 +100,27 @@ def _date_from_timestamp(ts: Any) -> date | None:
         return ts.date() if hasattr(ts, "date") else None
     except Exception:
         return None
+
+
+def _respect_yf_rate_limit() -> None:
+    global _YF_LAST_REQUEST_AT
+    with _YF_THROTTLE_LOCK:
+        now = time.monotonic()
+        wait_seconds = _YF_MIN_REQUEST_INTERVAL_SECONDS - (now - _YF_LAST_REQUEST_AT)
+        if wait_seconds > 0:
+            time.sleep(wait_seconds)
+            now = time.monotonic()
+        _YF_LAST_REQUEST_AT = now
+
+
+def _is_rate_limited_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return (
+        "too many requests" in text
+        or "rate limited" in text
+        or "invalid crumb" in text
+        or "unauthorized" in text
+    )
 
 
 class YFinanceProvider:
@@ -126,14 +152,46 @@ class YFinanceProvider:
 
         return yf.Ticker(symbol)
 
-    def _get_info(self, symbol: str) -> dict[str, Any]:
-        if symbol not in self._info_cache:
+    def _get_info(self, symbol: str, *, refresh: bool = False) -> dict[str, Any]:
+        if not refresh and symbol in self._info_cache:
+            return self._info_cache[symbol]
+
+        last_error: Exception | None = None
+        for attempt in range(3):
             ticker = self._get_ticker(symbol)
             try:
-                self._info_cache[symbol] = dict(ticker.info)
-            except Exception:
-                self._info_cache[symbol] = {}
-        return self._info_cache[symbol]
+                _respect_yf_rate_limit()
+                info = dict(ticker.info)
+            except Exception as exc:
+                last_error = exc
+                info = {}
+
+            if info:
+                self._info_cache[symbol] = info
+                return info
+
+            if attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
+
+        if last_error is not None:
+            logger.warning("Info fetch failed for %s: %s", symbol, last_error)
+        return {}
+
+    def _get_statement(self, symbol: str, attr: str):  # noqa: ANN202
+        last_error: Exception | None = None
+        for attempt in range(3):
+            ticker = self._get_ticker(symbol)
+            try:
+                _respect_yf_rate_limit()
+                return getattr(ticker, attr)
+            except Exception as exc:
+                last_error = exc
+                if attempt < 2:
+                    backoff = 1.5 * (attempt + 1) if _is_rate_limited_error(exc) else 0.5
+                    time.sleep(backoff)
+        if last_error is not None:
+            logger.warning("%s fetch failed for %s: %s", attr, symbol, last_error)
+        return None
 
     # ------------------------------------------------------------------
     # PriceProvider
@@ -151,15 +209,30 @@ class YFinanceProvider:
     def _fetch_prices_sync(
         self, ticker: str, as_of: date, lookback_days: int
     ) -> list[PriceBar]:
-        import yfinance as yf
-
         start = as_of - timedelta(days=int(lookback_days * 1.6))
         end = as_of + timedelta(days=1)  # yfinance end is exclusive
 
-        t = yf.Ticker(ticker)
-        df = t.history(start=str(start), end=str(end), auto_adjust=True)
+        last_error: Exception | None = None
+        df = None
+        for attempt in range(3):
+            t = self._get_ticker(ticker)
+            try:
+                _respect_yf_rate_limit()
+                df = t.history(start=str(start), end=str(end), auto_adjust=True)
+            except Exception as exc:
+                last_error = exc
+                if attempt < 2:
+                    backoff = 1.5 * (attempt + 1) if _is_rate_limited_error(exc) else 0.5
+                    time.sleep(backoff)
+                continue
+            if df is not None and not df.empty:
+                break
+            if attempt < 2:
+                time.sleep(1.0 * (attempt + 1))
 
-        if df.empty:
+        if df is None or df.empty:
+            if last_error is not None:
+                logger.warning("Price fetch failed for %s: %s", ticker, last_error)
             logger.warning("No price data for %s", ticker)
             return []
 
@@ -198,21 +271,10 @@ class YFinanceProvider:
     def _fetch_fundamentals_sync(
         self, ticker: str, as_of: date, n_quarters: int
     ) -> FundamentalData:
-        t = self._get_ticker(ticker)
-
         # Get quarterly statements
-        try:
-            income = t.quarterly_income_stmt
-        except Exception:
-            income = None
-        try:
-            balance = t.quarterly_balance_sheet
-        except Exception:
-            balance = None
-        try:
-            cashflow = t.quarterly_cashflow
-        except Exception:
-            cashflow = None
+        income = self._get_statement(ticker, "quarterly_income_stmt")
+        balance = self._get_statement(ticker, "quarterly_balance_sheet")
+        cashflow = self._get_statement(ticker, "quarterly_cashflow")
 
         quarters: list[QuarterlyFinancials] = []
 
@@ -277,7 +339,7 @@ class YFinanceProvider:
         quarters = quarters[:n_quarters]
 
         # Market cap and last close price
-        info = self._get_info(ticker)
+        info = self._get_info(ticker, refresh=not quarters)
         market_cap = _safe_float(info.get("marketCap"))
         last_close = _safe_float(info.get("previousClose"))
 

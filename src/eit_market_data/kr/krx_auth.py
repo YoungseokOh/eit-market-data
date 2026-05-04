@@ -34,6 +34,8 @@ DEFAULT_TIMEOUT_SECONDS = 30
 DEFAULT_LOGIN_TIMEOUT_SECONDS = 300
 _PROFILE_ENV = "EIT_KRX_PROFILE_DIR"
 _COOKIE_ENV = "EIT_KRX_COOKIE_PATH"
+_KRX_ID_ENV = "KRX_ID"
+_KRX_PASSWORD_ENV = "KRX_PW"
 
 _session_lock = threading.Lock()
 _configured_session: requests.Session | None = None
@@ -68,6 +70,41 @@ class AuthStatus:
     cookie_path: Path | None = None
 
 
+def _is_wsl_runtime() -> bool:
+    return bool(os.environ.get("WSL_DISTRO_NAME") or os.environ.get("WSL_INTEROP"))
+
+
+def _windows_helper_hint() -> str:
+    return "On Windows, run scripts/windows_krx_setup_and_probe.cmd from PowerShell or cmd."
+
+
+def _login_timeout_hint(timeout_seconds: int) -> str:
+    message = f"KRX login did not complete within {timeout_seconds} seconds."
+    if _is_wsl_runtime():
+        return (
+            f"{message} If the Chromium window did not appear in WSL, "
+            f"{_windows_helper_hint()}"
+        )
+    return message
+
+
+def _krx_credentials_from_env() -> tuple[str, str] | None:
+    user_id = os.environ.get(_KRX_ID_ENV, "").strip()
+    password = os.environ.get(_KRX_PASSWORD_ENV, "").strip()
+    if user_id and password:
+        return user_id, password
+    return None
+
+
+def _playwright_launch_options(profile_dir: Path) -> dict[str, Any]:
+    return {
+        "user_data_dir": str(profile_dir),
+        "headless": False,
+        "args": ["--start-maximized"],
+        "no_viewport": True,
+    }
+
+
 def resolve_profile_dir(profile_dir: str | Path | None = None) -> Path:
     if profile_dir is not None:
         return Path(profile_dir).expanduser().resolve()
@@ -87,6 +124,43 @@ def resolve_cookie_path(
     if raw:
         return Path(raw).expanduser().resolve()
     return (resolve_profile_dir(profile_dir) / "cookies.json").resolve()
+
+
+def has_krx_env_credentials() -> bool:
+    """Return whether KRX credentials are present without exposing their values."""
+    return _krx_credentials_from_env() is not None
+
+
+def _modern_pykrx_auth_module() -> Any | None:
+    """Return pykrx's built-in auth module when the installed version has it.
+
+    Recent pykrx versions ship their own KRXSession implementation. Replacing
+    webio.Get/Post in that version bypasses pykrx's login flow and causes KRX
+    data POSTs to return LOGOUT even when KRX_ID/KRX_PW are valid.
+    """
+    try:
+        from pykrx.website.comm import auth as pykrx_auth
+    except ImportError:
+        return None
+    if hasattr(pykrx_auth, "KRXSession") and hasattr(pykrx_auth, "get_auth_session"):
+        return pykrx_auth
+    return None
+
+
+def _authenticated_session_from_modern_pykrx() -> requests.Session | None:
+    """Create or refresh a pykrx-managed authenticated requests session."""
+    if _krx_credentials_from_env() is None:
+        return None
+
+    pykrx_auth = _modern_pykrx_auth_module()
+    if pykrx_auth is None:
+        return None
+
+    krx_session = pykrx_auth.get_auth_session()
+    session = getattr(krx_session, "session", None)
+    if isinstance(session, requests.Session):
+        return session
+    return None
 
 
 def build_krx_session() -> requests.Session:
@@ -196,6 +270,10 @@ def install_pykrx_krx_session_hooks() -> None:
         if _pykrx_hooks_installed:
             return
 
+        if _modern_pykrx_auth_module() is not None:
+            _pykrx_hooks_installed = True
+            return
+
         from eit_market_data.kr.pykrx_loader import load_pykrx_webio
 
         webio = load_pykrx_webio()
@@ -301,11 +379,18 @@ def _interactive_login_cookie_export(
         context = None
         try:
             context = playwright.chromium.launch_persistent_context(
-                str(profile_dir),
-                headless=False,
+                **_playwright_launch_options(profile_dir),
             )
             page = context.pages[0] if context.pages else context.new_page()
-            page.goto(KRX_LOGIN_URL, wait_until="domcontentloaded")
+            page.goto(
+                KRX_LOGIN_URL,
+                wait_until="domcontentloaded",
+                timeout=DEFAULT_TIMEOUT_SECONDS * 1000,
+            )
+            page.bring_to_front()
+            logger.info("Opened KRX login page: url=%s title=%s", page.url, page.title())
+            if _maybe_submit_env_login(page):
+                logger.info("Submitted KRX login form using %s/%s from environment.", _KRX_ID_ENV, _KRX_PASSWORD_ENV)
             deadline = time.monotonic() + timeout_seconds
 
             while time.monotonic() < deadline:
@@ -322,17 +407,34 @@ def _interactive_login_cookie_export(
                 raise KrxAuthRequired(
                     "Chromium window closed before KRX login completed. "
                     "Keep the browser open until the terminal prints [OK]. "
-                    "On Windows, run scripts/windows_krx_setup_and_probe.cmd "
-                    "from PowerShell or cmd."
+                    f"{_windows_helper_hint()}"
                 ) from exc
             raise
         finally:
             if context is not None:
                 context.close()
 
-    raise KrxAuthRequired(
-        f"KRX login did not complete within {timeout_seconds} seconds"
-    )
+    raise KrxAuthRequired(_login_timeout_hint(timeout_seconds))
+
+
+def _maybe_submit_env_login(page: Any) -> bool:
+    credentials = _krx_credentials_from_env()
+    if credentials is None:
+        return False
+
+    user_id, password = credentials
+    try:
+        login_frame = page.frame_locator("#COMS001_FRAME")
+        login_frame.locator("input[name='mbrId']").fill(user_id, timeout=10_000)
+        login_frame.locator("input[name='pw']").fill(password, timeout=10_000)
+        login_frame.locator(".jsLoginBtn").click(timeout=10_000)
+        return True
+    except Exception as exc:
+        logger.warning(
+            "KRX environment credential auto-submit failed; leaving browser open for manual login: %s",
+            exc,
+        )
+        return False
 
 
 def ensure_krx_authenticated_session(
@@ -345,6 +447,12 @@ def ensure_krx_authenticated_session(
 ) -> requests.Session:
     install_pykrx_krx_session_hooks()
     install_fdr_krx_session_hooks()
+
+    if not force_refresh:
+        modern_session = _authenticated_session_from_modern_pykrx()
+        if modern_session is not None:
+            configure_krx_session(modern_session)
+            return modern_session
 
     if not force_refresh:
         current = get_krx_session()

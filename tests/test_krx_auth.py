@@ -1,151 +1,95 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import requests
 
+from eit_market_data.kr import krx_auth
+
 from eit_market_data.kr.krx_auth import (
-    auth_failure_reason,
-    build_krx_session,
-    configure_krx_session,
-    install_fdr_krx_session_hooks,
-    load_cookies_from_file,
-    save_cookies_to_file,
+    _krx_credentials_from_env,
+    _is_wsl_runtime,
+    _login_timeout_hint,
+    _playwright_launch_options,
+    has_krx_env_credentials,
 )
 
 
-def _response(
-    status_code: int, text: str, content_type: str = "text/html; charset=utf-8"
-) -> requests.Response:
-    response = requests.Response()
-    response.status_code = status_code
-    response._content = text.encode("utf-8")  # noqa: SLF001
-    response.headers["content-type"] = content_type
-    response.url = "https://data.krx.co.kr/test"
-    return response
+def test_playwright_launch_options_maximize_window() -> None:
+    options = _playwright_launch_options(Path("/tmp/krx-profile"))
+
+    assert options["user_data_dir"] == "/tmp/krx-profile"
+    assert options["headless"] is False
+    assert options["no_viewport"] is True
+    assert "--start-maximized" in options["args"]
 
 
-def test_auth_failure_reason_detects_logout() -> None:
-    response = _response(400, "LOGOUT")
+def test_login_timeout_hint_mentions_windows_helper_on_wsl(monkeypatch) -> None:
+    monkeypatch.setenv("WSL_DISTRO_NAME", "Ubuntu")
 
-    reason = auth_failure_reason(response)
-
-    assert reason == "status=400 LOGOUT"
-
-
-def test_auth_failure_reason_detects_login_html() -> None:
-    html = """
-    <html lang="ko">
-      <head><title>로그인 - KRX | KRX Data Marketplace</title></head>
-      <body>alert('로그인 또는 회원가입이 필요합니다.');</body>
-    </html>
-    """
-    response = _response(200, html)
-
-    reason = auth_failure_reason(response)
-
-    assert reason == "redirected to KRX login page"
+    assert _is_wsl_runtime() is True
+    assert "windows_krx_setup_and_probe.cmd" in _login_timeout_hint(300)
 
 
-def test_cookie_roundtrip(tmp_path: Path) -> None:
-    cookie_path = tmp_path / "cookies.json"
-    cookies = [
-        {
-            "name": "JSESSIONID",
-            "value": "abc",
-            "domain": "data.krx.co.kr",
-            "path": "/",
-        }
-    ]
+def test_login_timeout_hint_is_plain_outside_wsl(monkeypatch) -> None:
+    monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
+    monkeypatch.delenv("WSL_INTEROP", raising=False)
 
-    save_cookies_to_file(cookies, cookie_path)
-    session = load_cookies_from_file(cookie_path, build_krx_session())
-
-    assert session.cookies.get("JSESSIONID") == "abc"
+    assert _is_wsl_runtime() is False
+    assert _login_timeout_hint(300) == "KRX login did not complete within 300 seconds."
 
 
-def test_install_fdr_hooks_uses_shared_session_without_mutating_global_requests(
+def test_krx_credentials_from_env_requires_id_and_password(monkeypatch) -> None:
+    monkeypatch.setenv("KRX_ID", "user")
+    monkeypatch.delenv("KRX_PW", raising=False)
+
+    assert _krx_credentials_from_env() is None
+    assert has_krx_env_credentials() is False
+
+    monkeypatch.setenv("KRX_PW", "secret")
+
+    assert _krx_credentials_from_env() == ("user", "secret")
+    assert has_krx_env_credentials() is True
+
+
+def test_install_pykrx_hooks_skips_legacy_patch_when_pykrx_has_auth(
     monkeypatch,
 ) -> None:
-    import FinanceDataReader.krx.data as fdr_krx_data
-    import FinanceDataReader.krx.listing as fdr_krx_listing
-    import FinanceDataReader.krx.snap as fdr_krx_snap
-    import requests as requests_module
-    from eit_market_data.kr import krx_auth
-
-    original_get = requests_module.get
-    original_post = requests_module.post
-
-    monkeypatch.setattr(krx_auth, "_configured_session", None)
-    monkeypatch.setattr(krx_auth, "_fdr_hooks_installed", False)
-    monkeypatch.setattr(fdr_krx_data, "requests", requests_module)
-    monkeypatch.setattr(fdr_krx_listing, "requests", requests_module)
-    monkeypatch.setattr(fdr_krx_snap, "requests", requests_module)
-
-    class DummySession:
-        def __init__(self) -> None:
-            self.calls: list[tuple[str, str, dict[str, object]]] = []
-
-        def get(self, url: str, **kwargs):  # noqa: ANN001, ANN202
-            self.calls.append(("get", url, kwargs))
-            response = requests.Response()
-            response.status_code = 200
-            response._content = b"{}"  # noqa: SLF001
-            response.headers["content-type"] = "application/json"
-            response.url = url
-            return response
-
-        def post(self, url: str, **kwargs):  # noqa: ANN001, ANN202
-            self.calls.append(("post", url, kwargs))
-            response = requests.Response()
-            response.status_code = 200
-            response._content = b"{}"  # noqa: SLF001
-            response.headers["content-type"] = "application/json"
-            response.url = url
-            return response
-
-    session = DummySession()
-    configure_krx_session(session)  # type: ignore[arg-type]
-
-    install_fdr_krx_session_hooks()
-
-    assert requests_module.get is original_get
-    assert requests_module.post is original_post
-    assert fdr_krx_data.requests is not requests_module
-    assert fdr_krx_listing.requests is not requests_module
-    assert fdr_krx_snap.requests is not requests_module
-
-    fdr_krx_data.requests.get("https://data.krx.co.kr/test", headers={"X-Test": "1"})
-    fdr_krx_listing.requests.post(
-        "https://data.krx.co.kr/test",
-        data={"foo": "bar"},
-        timeout=7,
+    monkeypatch.setattr(krx_auth, "_pykrx_hooks_installed", False)
+    monkeypatch.setattr(
+        krx_auth,
+        "_modern_pykrx_auth_module",
+        lambda: SimpleNamespace(KRXSession=object, get_auth_session=lambda: None),
     )
 
-    assert session.calls == [
-        (
-            "get",
-            "https://data.krx.co.kr/test",
-            {
-                "headers": {
-                    "User-Agent": "Mozilla/5.0",
-                    "Referer": "https://data.krx.co.kr/contents/MDC/MDI/outerLoader/index.cmd",
-                    "X-Test": "1",
-                },
-                "timeout": 30,
-            },
-        ),
-        (
-            "post",
-            "https://data.krx.co.kr/test",
-            {
-                "data": {"foo": "bar"},
-                "json": None,
-                "headers": {
-                    "User-Agent": "Mozilla/5.0",
-                    "Referer": "https://data.krx.co.kr/contents/MDC/MDI/outerLoader/index.cmd",
-                },
-                "timeout": 7,
-            },
-        ),
-    ]
+    def fail_load_webio():  # noqa: ANN202
+        raise AssertionError("legacy webio hooks must not be installed")
+
+    monkeypatch.setattr(
+        "eit_market_data.kr.pykrx_loader.load_pykrx_webio",
+        fail_load_webio,
+    )
+
+    krx_auth.install_pykrx_krx_session_hooks()
+
+    assert krx_auth._pykrx_hooks_installed is True
+
+
+def test_ensure_krx_authenticated_session_prefers_modern_pykrx_session(
+    monkeypatch,
+) -> None:
+    session = requests.Session()
+    pykrx_auth = SimpleNamespace(
+        get_auth_session=lambda: SimpleNamespace(session=session),
+    )
+
+    monkeypatch.setenv("KRX_ID", "user")
+    monkeypatch.setenv("KRX_PW", "secret")
+    monkeypatch.setattr(krx_auth, "_configured_session", None)
+    monkeypatch.setattr(krx_auth, "install_pykrx_krx_session_hooks", lambda: None)
+    monkeypatch.setattr(krx_auth, "install_fdr_krx_session_hooks", lambda: None)
+    monkeypatch.setattr(krx_auth, "_modern_pykrx_auth_module", lambda: pykrx_auth)
+
+    assert krx_auth.ensure_krx_authenticated_session(interactive=False) is session
+    assert krx_auth.get_krx_session() is session

@@ -23,7 +23,7 @@ def main() -> None:
     parser.add_argument(
         "--kind",
         required=True,
-        choices=["top100", "top300", "full"],
+        choices=["kospi200", "top100", "top200", "top300", "full"],
         help="Universe kind to generate.",
     )
     parser.add_argument(

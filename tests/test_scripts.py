@@ -114,7 +114,11 @@ def test_preflight_dart_marks_missing_market_fields_as_degraded(monkeypatch) -> 
                 ],
             )
 
-    monkeypatch.setattr(module, "CompositeKrFundamentalProvider", lambda: DummyProvider())
+    monkeypatch.setattr(
+        module,
+        "CompositeKrFundamentalProvider",
+        lambda *args, **kwargs: DummyProvider(),
+    )
 
     result = asyncio.run(module._check_dart(date(2026, 3, 6), "005930"))
 
@@ -290,6 +294,152 @@ def test_crawl_kr_data_fallback_saves_daily_cap_grouped_files(
     frame = saved[output]
     assert frame["종목코드"].tolist() == ["000660", "005930"]
     assert set(frame.columns) >= {"종목코드", "시가총액", "상장주식수", "source_trade_date"}
+
+
+def test_build_us_batch_recreates_providers_each_month(tmp_path: Path, monkeypatch) -> None:
+    module = _load_module(
+        Path("scripts/build_us_batch.py"),
+        "build_us_batch_recreate_provider_test",
+    )
+    created: list[int] = []
+
+    class DummyBuilder:
+        def __init__(self, **kwargs):  # noqa: ANN003
+            _ = kwargs
+
+        async def build(self, month: str, universe: list[str], config):  # noqa: ANN001
+            _ = config
+            month_num = int(month[-2:])
+            trade_day = date(2025, month_num, 28)
+            return MonthlySnapshot(
+                decision_date=trade_day,
+                execution_date=trade_day,
+                universe=universe,
+                prices={
+                    ticker: [
+                        PriceBar(
+                            date=trade_day,
+                            open=1.0,
+                            high=1.0,
+                            low=1.0,
+                            close=1.0,
+                            volume=1.0,
+                        )
+                    ]
+                    for ticker in universe
+                },
+                fundamentals={
+                    ticker: FundamentalData(
+                        ticker=ticker,
+                        quarters=[],
+                        market_cap=1.0,
+                        last_close_price=1.0,
+                    )
+                    for ticker in universe
+                },
+                filings={ticker: FilingData(ticker=ticker) for ticker in universe},
+                news={},
+                macro=MacroData(),
+                sector_map={ticker: "Tech" for ticker in universe},
+                sector_averages={},
+                benchmark_prices=[],
+                input_hash="x",
+                metadata=SnapshotMetadata(),
+            )
+
+    def fake_create_real_providers():
+        created.append(len(created) + 1)
+        return {
+            "price_provider": object(),
+            "fundamental_provider": object(),
+            "filing_provider": object(),
+            "macro_provider": object(),
+            "sector_provider": object(),
+            "benchmark_provider": object(),
+        }
+
+    async def fake_build_chunked_snapshot(
+        month,
+        universe,
+        builder,
+        config,
+        *,
+        chunk_size,
+        chunk_pause_seconds,
+    ):  # noqa: ANN001
+        _ = (chunk_size, chunk_pause_seconds)
+        return await builder.build(month, list(universe), config)
+
+    monkeypatch.setattr(module, "_resolve_sp500_tickers", lambda path: ["AAPL"])
+    monkeypatch.setattr(module, "_resolve_nasdaq100_tickers", lambda source: [])
+    monkeypatch.setattr(module, "create_real_providers", fake_create_real_providers)
+    monkeypatch.setattr(module, "SnapshotBuilder", DummyBuilder)
+    monkeypatch.setattr(module, "_build_chunked_snapshot", fake_build_chunked_snapshot)
+
+    asyncio.run(
+        module.build_month_range(
+            start_month="2025-01",
+            end_month="2025-02",
+            out_root=tmp_path,
+            sp500_csv=tmp_path / "sp500.csv",
+            month_batch_size=0,
+            month_batch_index=0,
+            chunk_size=0,
+            chunk_pause_seconds=0.0,
+            ndx_source=module.NDX_SOURCE_WIKIPEDIA,
+            as_of_only=False,
+            pause_seconds=0.0,
+            fail_fast=True,
+        )
+    )
+
+    assert created == [1, 2]
+
+
+def test_build_us_batch_waits_between_chunks(tmp_path: Path, monkeypatch) -> None:
+    module = _load_module(
+        Path("scripts/build_us_batch.py"),
+        "build_us_batch_chunk_delay_test",
+    )
+    slept: list[float] = []
+
+    class DummyBuilder:
+        async def build(self, month: str, universe: list[str], config):  # noqa: ANN001
+            _ = (month, config)
+            trade_day = date(2025, 1, 31)
+            return MonthlySnapshot(
+                decision_date=trade_day,
+                execution_date=trade_day,
+                universe=universe,
+                prices={},
+                fundamentals={},
+                filings={},
+                news={},
+                macro=MacroData(),
+                sector_map={},
+                sector_averages={},
+                benchmark_prices=[],
+                input_hash="x",
+                metadata=SnapshotMetadata(),
+            )
+
+    async def fake_sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr(module.asyncio, "sleep", fake_sleep)
+
+    asyncio.run(
+        module._build_chunked_snapshot(
+            month="2025-01",
+            universe=["A", "B", "C", "D", "E"],
+            builder=DummyBuilder(),
+            config=module.SnapshotConfig(artifacts_dir=str(tmp_path)),
+            chunk_size=2,
+            chunk_pause_seconds=3.0,
+        )
+    )
+
+    assert slept == [3.0, 3.0]
 
 
 def test_crawl_kr_data_fallback_default_uses_full_public_listings() -> None:

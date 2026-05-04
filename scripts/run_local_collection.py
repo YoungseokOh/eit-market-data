@@ -1,3 +1,4 @@
+# ruff: noqa: E402
 from __future__ import annotations
 
 import argparse
@@ -42,7 +43,7 @@ def main() -> None:
     parser.add_argument(
         "--full-universe-kind",
         default="top100",
-        choices=["top100", "top300", "full"],
+        choices=["kospi200", "top100", "top200", "top300", "full"],
         help="Universe kind used for the full KR phase.",
     )
     parser.add_argument(
@@ -53,6 +54,12 @@ def main() -> None:
         "--resume",
         action="store_true",
         help="Resume from the last validated checkpoint inside the same run root.",
+    )
+    parser.add_argument(
+        "--dart-mode",
+        default="live",
+        choices=["live", "cache_only"],
+        help="Use live OpenDART calls or local DART cache only for KR bundles.",
     )
     parser.add_argument(
         "--us-universe",
@@ -70,6 +77,7 @@ def main() -> None:
         start=date.fromisoformat(args.start) if args.start else None,
         resume=args.resume,
         us_universe=args.us_universe,
+        dart_mode=args.dart_mode,
     )
     print(run_root)
 

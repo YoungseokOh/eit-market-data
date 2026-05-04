@@ -292,6 +292,7 @@ async def _build_chunked_snapshot(
     config: SnapshotConfig,
     *,
     chunk_size: int,
+    chunk_pause_seconds: float = 0.0,
 ) -> MonthlySnapshot:
     if chunk_size <= 0 or chunk_size >= len(universe):
         return await builder.build(month=month, universe=list(universe), config=config)
@@ -307,6 +308,9 @@ async def _build_chunked_snapshot(
         )
         snapshot = await builder.build(month=month, universe=list(chunk), config=config)
         chunk_snaps.append(snapshot)
+        if chunk_pause_seconds > 0 and idx < (len(universe) - 1) // chunk_size + 1:
+            logger.info("[%s] sleep %.1fs before next chunk", month, chunk_pause_seconds)
+            await asyncio.sleep(chunk_pause_seconds)
 
     merged = _merge_snapshots(chunk_snaps)
 
@@ -408,6 +412,7 @@ async def build_month_range(
     month_batch_size: int,
     month_batch_index: int,
     chunk_size: int,
+    chunk_pause_seconds: float,
     ndx_source: str,
     as_of_only: bool,
     pause_seconds: float,
@@ -452,8 +457,6 @@ async def build_month_range(
             len(months),
         )
 
-    providers = create_real_providers()
-    builder = SnapshotBuilder(**providers)
     config = SnapshotConfig(artifacts_dir=str(out_root))
     month_count = len(months)
 
@@ -472,12 +475,17 @@ async def build_month_range(
 
         try:
             logger.info("[%s] START %d/%d (%d tickers)", month, i, month_count, len(universe))
+            # Recreate providers each month so transient Yahoo failures do not
+            # poison cached ticker metadata across the whole backfill.
+            providers = create_real_providers()
+            builder = SnapshotBuilder(**providers)
             snapshot = await _build_chunked_snapshot(
                 month=month,
                 universe=universe,
                 builder=builder,
                 config=config,
                 chunk_size=chunk_size,
+                chunk_pause_seconds=chunk_pause_seconds,
             )
 
             metadata = SnapshotMetadata(
@@ -552,13 +560,19 @@ def main() -> None:
     parser.add_argument(
         "--chunk-size",
         type=int,
-        default=120,
-        help="Split US universe into chunks for stability (0=disable)",
+        default=40,
+        help="Split US universe into smaller chunks for Yahoo stability (0=disable)",
+    )
+    parser.add_argument(
+        "--chunk-delay",
+        type=float,
+        default=8.0,
+        help="Pause between chunks (seconds)",
     )
     parser.add_argument(
         "--month-delay",
         type=float,
-        default=0.0,
+        default=5.0,
         help="Pause between months (seconds)",
     )
     parser.add_argument(
@@ -615,6 +629,7 @@ def main() -> None:
             month_batch_size=args.month_batch_size,
             month_batch_index=args.month_batch_index,
             chunk_size=args.chunk_size,
+            chunk_pause_seconds=args.chunk_delay,
             ndx_source=args.ndx_source,
             as_of_only=args.as_of_only,
             pause_seconds=args.month_delay,

@@ -10,6 +10,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+from eit_market_data.kr.market_helpers import normalize_ticker
 from eit_market_data.schemas.snapshot import FilingData, FundamentalData, QuarterlyFinancials
 
 logger = logging.getLogger(__name__)
@@ -21,6 +22,9 @@ _DART_CACHE_DIR = Path(
         str(_PROJECT_ROOT / "data" / "dart_cache"),
     )
 ).expanduser()
+_DART_CACHE_SIZE_LIMIT = int(
+    os.environ.get("EIT_DART_CACHE_SIZE_LIMIT_BYTES", str(50 * 1024 * 1024 * 1024))
+)
 _FINSTATE_TTL = 120 * 86_400   # quarterly statements are final once filed
 _REPORT_LIST_TTL = 30 * 86_400  # new filings may appear; refresh monthly
 _DOC_TTL = 365 * 86_400        # documents never change after filing
@@ -87,8 +91,7 @@ _EPS_FIELDS = {"eps"}
 
 
 def _normalize_ticker(ticker: str) -> str:
-    digits = "".join(ch for ch in str(ticker) if ch.isdigit())
-    return digits.zfill(6) if digits else str(ticker)
+    return normalize_ticker(ticker)
 
 
 def _date_to_yyyymmdd(value: date) -> str:
@@ -188,6 +191,46 @@ def _extract_sections(doc_text: str, max_chars: int = 8000) -> dict[str, str]:
             extracted[section_name] = chunk
 
     return extracted
+
+
+def _parse_share_count(raw: str) -> float | None:
+    text = raw.strip().replace(",", "")
+    if not text or not text.isdigit():
+        return None
+    value = float(text)
+    return value if value > 0 else None
+
+
+def _extract_issued_shares_from_document(doc_text: str) -> float | None:
+    """Extract common issued shares from DART's share-count table."""
+    plain = _clean_document_text(doc_text)
+    starts: list[int] = []
+    for marker in ("주식의 총수 현황", "4. 주식의 총수 등", "주식의 총수 등"):
+        offset = 0
+        while True:
+            found = plain.find(marker, offset)
+            if found < 0:
+                break
+            starts.append(found)
+            offset = found + len(marker)
+
+    if not starts:
+        starts = [0]
+
+    patterns = (
+        r"발행주식의\s*총수\s*\([^)]*\)\s*\n+\s*([0-9][0-9,]+)",
+        r"발행주식총수\s*\n+\s*([0-9][0-9,]+)",
+    )
+    for start in sorted(set(starts)):
+        chunk = plain[start : start + 8000]
+        for pattern in patterns:
+            match = re.search(pattern, chunk)
+            if match is None:
+                continue
+            parsed = _parse_share_count(match.group(1))
+            if parsed is not None:
+                return parsed
+    return None
 
 
 def _quarter_sort_key(fiscal_quarter: str) -> tuple[int, int]:
@@ -377,7 +420,10 @@ class DartProvider:
         try:
             import diskcache
             _DART_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-            self._cache: Any = diskcache.Cache(str(_DART_CACHE_DIR))
+            self._cache: Any = diskcache.Cache(
+                str(_DART_CACHE_DIR),
+                size_limit=_DART_CACHE_SIZE_LIMIT,
+            )
         except ImportError:
             self._cache = None
 
@@ -448,6 +494,34 @@ class DartProvider:
                 return stale
             if self._raise_on_error:
                 raise RuntimeError(f"DART filing returned empty for {norm_ticker}")
+        return result
+
+    async def fetch_issued_shares(self, ticker: str, as_of: date) -> float | None:
+        norm_ticker = _normalize_ticker(ticker)
+        cache_key = f"issued_shares:{norm_ticker}:{as_of.strftime('%Y%m')}"
+        cached = self._cache_get(cache_key)
+        if isinstance(cached, (int, float)) and cached > 0:
+            return float(cached)
+
+        async with self._semaphore:
+            try:
+                result = await asyncio.to_thread(
+                    self._fetch_issued_shares_sync,
+                    norm_ticker,
+                    as_of,
+                )
+            except Exception as e:
+                logger.warning("DART issued-shares fetch failed for %s: %s", norm_ticker, e)
+                if self._raise_on_error:
+                    raise
+                result = None
+
+        if result is not None:
+            self._cache_set(cache_key, result, _DOC_TTL)
+        elif self._allow_stale_fallback:
+            stale = self._cache_stale(f"issued_shares:{norm_ticker}:")
+            if isinstance(stale, (int, float)) and stale > 0:
+                return float(stale)
         return result
 
     # ------------------------------------------------------------------
@@ -696,6 +770,8 @@ class DartProvider:
             report_list = self._fetch_report_list(corp_code, as_of)
         except Exception as e:
             logger.warning("DART report list fetch failed for %s: %s", ticker, e)
+            if self._raise_on_error:
+                raise
             return FundamentalData(ticker=ticker)
 
         entries = _report_entries_from_list(report_list, as_of)
@@ -746,9 +822,71 @@ class DartProvider:
             quarters=quarters[:n_quarters],
         )
 
+    def _fetch_issued_shares_sync(self, ticker: str, as_of: date) -> float | None:
+        corp_code = self._ticker_to_corp_code(ticker)
+        if not corp_code:
+            return None
+
+        try:
+            report_list = self._fetch_report_list(corp_code, as_of)
+        except Exception as e:
+            logger.warning("DART report list fetch failed for issued shares %s: %s", ticker, e)
+            if self._raise_on_error:
+                raise
+            return None
+
+        entries = _report_entries_from_list(report_list, as_of)
+        for entry in entries:
+            rcept_no = entry.get("rcept_no")
+            if not rcept_no:
+                continue
+            doc_text = self._fetch_document(str(rcept_no))
+            if not doc_text:
+                continue
+            issued_shares = _extract_issued_shares_from_document(doc_text)
+            if issued_shares is not None:
+                return issued_shares
+        return None
+
     # ------------------------------------------------------------------
     # Filing
     # ------------------------------------------------------------------
+
+    def _fetch_document(self, rcept_no: str) -> str:
+        doc_cache_key = f"doc:{rcept_no}"
+        doc = self._cache_get(doc_cache_key)
+        if doc is None:
+            doc = self._dart.document(rcept_no)
+            if doc:
+                self._cache_set(doc_cache_key, doc, _DOC_TTL)
+        if isinstance(doc, bytes):
+            return doc.decode("utf-8", errors="ignore")
+        return str(doc) if doc else ""
+
+    def _filing_report_candidates(self, report_list: Any, as_of: date) -> Any:
+        reports = report_list.copy()
+        if "rcept_dt" in reports.columns:
+            reports = reports.loc[
+                reports["rcept_dt"].fillna("").astype(str) <= _date_to_yyyymmdd(as_of)
+            ]
+        if reports.empty:
+            return reports
+
+        annual_mask = None
+        if "reprt_code" in reports.columns:
+            annual_mask = reports["reprt_code"].fillna("").astype(str) == "11011"
+        if "report_nm" in reports.columns:
+            name_mask = reports["report_nm"].fillna("").astype(str).str.contains(
+                "사업보고서",
+                regex=False,
+            )
+            annual_mask = name_mask if annual_mask is None else annual_mask | name_mask
+        if annual_mask is not None and annual_mask.any():
+            reports = reports.loc[annual_mask]
+
+        if "rcept_dt" in reports.columns:
+            reports = reports.sort_values("rcept_dt", ascending=False)
+        return reports
 
     def _fetch_filing_sync(self, ticker: str, as_of: date) -> FilingData:
         corp_code = self._ticker_to_corp_code(ticker)
@@ -759,53 +897,50 @@ class DartProvider:
             report_list = self._fetch_report_list(corp_code, as_of)
         except Exception as e:
             logger.warning("DART report list fetch failed for %s: %s", ticker, e)
+            if self._raise_on_error:
+                raise
             return FilingData(ticker=ticker)
 
         if report_list is None or report_list.empty:
             return FilingData(ticker=ticker)
 
-        reports = report_list.copy()
-        if "rcept_dt" in reports.columns:
-            reports = reports.loc[
-                reports["rcept_dt"].fillna("").astype(str) <= _date_to_yyyymmdd(as_of)
-            ]
-        if "reprt_code" in reports.columns:
-            annual = reports.loc[reports["reprt_code"].astype(str) == "11011"]
-            if not annual.empty:
-                reports = annual
+        reports = self._filing_report_candidates(report_list, as_of)
         if reports.empty:
             return FilingData(ticker=ticker)
 
-        if "rcept_dt" in reports.columns:
-            reports = reports.sort_values("rcept_dt", ascending=False)
-        latest = reports.iloc[0]
+        fallback_date: date | None = None
+        for _, report in reports.iterrows():
+            rcept_no = str(report.get("rcept_no", "")).strip()
+            filing_date = _parse_date_yyyymmdd(report.get("rcept_dt"))
+            if fallback_date is None:
+                fallback_date = filing_date
+            if not rcept_no:
+                continue
 
-        rcept_no = str(latest.get("rcept_no", "")).strip()
-        filing_date = _parse_date_yyyymmdd(latest.get("rcept_dt"))
-        if not rcept_no:
-            return FilingData(ticker=ticker, filing_date=filing_date, filing_type="사업보고서")
-
-        try:
-            doc_cache_key = f"doc:{rcept_no}"
-            doc = self._cache_get(doc_cache_key)
-            if doc is None:
-                doc = self._dart.document(rcept_no)
-                if doc:
-                    self._cache_set(doc_cache_key, doc, _DOC_TTL)
-            if isinstance(doc, bytes):
-                doc_text = doc.decode("utf-8", errors="ignore")
-            else:
-                doc_text = str(doc) if doc else ""
-            sections = _extract_sections(doc_text) if doc_text else {}
-        except Exception as e:
-            logger.warning("DART document fetch/parse failed for %s: %s", ticker, e)
-            sections = {}
+            try:
+                doc_text = self._fetch_document(rcept_no)
+                sections = _extract_sections(doc_text) if doc_text else {}
+            except Exception as e:
+                logger.warning(
+                    "DART document fetch/parse failed for %s %s: %s",
+                    ticker,
+                    rcept_no,
+                    e,
+                )
+                continue
+            if not sections.get("business_overview"):
+                continue
+            return FilingData(
+                ticker=ticker,
+                filing_date=filing_date,
+                filing_type="사업보고서",
+                business_overview=sections.get("business_overview"),
+                risks=sections.get("risks"),
+                mda=sections.get("mda"),
+            )
 
         return FilingData(
             ticker=ticker,
-            filing_date=filing_date,
+            filing_date=fallback_date,
             filing_type="사업보고서",
-            business_overview=sections.get("business_overview"),
-            risks=sections.get("risks"),
-            mda=sections.get("mda"),
         )

@@ -504,6 +504,8 @@ def _snapshot_field_coverage(snapshot: Any) -> dict[str, Any]:
 
 
 def _read_existing_field_coverage(snapshot_dir: Path) -> dict[str, Any] | None:
+    snapshot_coverage: dict[str, Any] | None = None
+
     manifest_path = snapshot_dir / "manifest.json"
     if manifest_path.exists():
         try:
@@ -512,56 +514,92 @@ def _read_existing_field_coverage(snapshot_dir: Path) -> dict[str, Any] | None:
             return None
         coverage = manifest.get("field_coverage")
         if isinstance(coverage, dict):
-            return coverage
+            snapshot_coverage = coverage
 
     snapshot_path = snapshot_dir / "snapshot.json"
     if not snapshot_path.exists():
-        return None
+        return snapshot_coverage
     try:
         snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
-        return None
-    return _snapshot_field_coverage(snapshot)
+        return snapshot_coverage
+
+    computed = _snapshot_field_coverage(snapshot)
+    if snapshot_coverage is None:
+        return computed
+
+    merged = dict(snapshot_coverage)
+    for key, value in computed.items():
+        if key not in merged:
+            merged[key] = value
+    return merged
 
 
 def _snapshot_dir_complete(snapshot_dir: Path, market: str) -> bool:
-    if not (snapshot_dir / "snapshot.json").exists():
-        return False
-    if not (snapshot_dir / "snapshot.json.gz").exists():
-        return False
-    if not (snapshot_dir / "metadata.json").exists():
-        return False
-    if not (snapshot_dir / "summary.json").exists():
-        return False
-    if not (snapshot_dir / "manifest.json").exists():
-        return False
+    complete, _ = _snapshot_completion_status(snapshot_dir, market)
+    return complete
+
+
+def _snapshot_completion_status(snapshot_dir: Path, market: str) -> tuple[bool, list[str]]:
+    reasons: list[str] = []
+    required = [
+        "snapshot.json",
+        "snapshot.json.gz",
+        "metadata.json",
+        "summary.json",
+        "manifest.json",
+    ]
+    for filename in required:
+        if not (snapshot_dir / filename).exists():
+            reasons.append(f"missing {filename}")
+
+    if reasons:
+        return False, reasons
 
     try:
         summary = json.loads((snapshot_dir / "summary.json").read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return False
-    if summary.get("status") != "ok":
-        return False
+    except (json.JSONDecodeError, OSError) as exc:
+        reasons.append(f"summary.json not readable: {type(exc).__name__}")
+        return False, reasons
+    if not isinstance(summary, dict):
+        reasons.append("summary.json is not a dict")
+        return False, reasons
+
+    status = summary.get("status")
+    if status != "ok":
+        reasons.append(f"summary.status={status}")
+        return False, reasons
 
     coverage = _read_existing_field_coverage(snapshot_dir)
     if not coverage:
-        return False
+        reasons.append("field_coverage unavailable")
+        return False, reasons
     universe_size = int(coverage.get("universe_size", 0) or 0)
     if universe_size <= 0:
-        return False
+        reasons.append(f"invalid universe size: {universe_size}")
+        return False, reasons
+
     min_kr_fields = int(universe_size * KR_MIN_FIELD_COVERAGE_RATIO)
 
-    if int(coverage.get("prices", 0) or 0) <= 0:
-        return False
-    if market == "kr" and int(coverage.get("fundamentals", 0) or 0) < min_kr_fields:
-        return False
-    if market == "kr" and int(coverage.get("market_cap", 0) or 0) < min_kr_fields:
-        return False
-    if market == "kr" and int(coverage.get("issued_shares", 0) or 0) < min_kr_fields:
-        return False
-    if market != "kr" and int(coverage.get("fundamentals", 0) or 0) <= 0:
-        return False
-    return True
+    prices = int(coverage.get("prices", 0) or 0)
+    if prices <= 0:
+        reasons.append("prices=0")
+
+    fundamentals = int(coverage.get("fundamentals", 0) or 0)
+    if market == "kr":
+        if fundamentals < min_kr_fields:
+            reasons.append(f"fundamentals={fundamentals} (<{min_kr_fields})")
+        market_cap = int(coverage.get("market_cap", 0) or 0)
+        if market_cap < min_kr_fields:
+            reasons.append(f"market_cap={market_cap} (<{min_kr_fields})")
+        issued_shares = int(coverage.get("issued_shares", 0) or 0)
+        if issued_shares < min_kr_fields:
+            reasons.append(f"issued_shares={issued_shares} (<{min_kr_fields})")
+    else:
+        if fundamentals <= 0:
+            reasons.append("fundamentals=0")
+
+    return len(reasons) == 0, reasons
 
 
 def _manifest_warnings(market: str, coverage: dict[str, Any]) -> list[str]:
@@ -1142,38 +1180,73 @@ async def phase3_kr_snapshots(
         snapshot_months[-1] if snapshot_months else "?", profile,
     )
 
-    # Full KR market tickers via FDR (KOSPI + KOSDAQ).
-    # SnapshotBuilder.build() throttles concurrent provider calls.
-    full_tickers = _fdr_all_kr_tickers()
+    month_checks: list[tuple[str, bool, list[str]]] = []
+    for month_str in snapshot_months:
+        month_path = artifacts_root / "kr" / "snapshots" / month_str
+        done, reasons = _snapshot_completion_status(month_path, "kr")
+        month_checks.append((month_str, done, reasons))
 
-    todo_months = [
-        m
-        for m in snapshot_months
-        if not _snapshot_dir_complete(artifacts_root / "kr" / "snapshots" / m, "kr")
-    ]
-    skip_n = len(snapshot_months) - len(todo_months)
+    done_months = [entry for entry in month_checks if entry[1]]
+    todo_months = [entry[0] for entry in month_checks if not entry[1]]
+    skip_reason_map: Counter[str] = Counter()
+    for _, _, reasons in done_months:
+        for reason in reasons:
+            skip_reason_map[reason] += 1
+
+    done_n = len(done_months)
+    skip_n = done_n
+    if skip_n > 0:
+        logger.info("[Phase 3] KR snapshots skipped: %d", skip_n)
+        for reason, count in skip_reason_map.most_common():
+            logger.info("[Phase 3]   - %s: %d months", reason, count)
+
+    # Full KR market tickers via FDR (KOSPI + KOSDAQ). Defer this network
+    # lookup until at least one month actually needs to be built.
+    full_tickers = _fdr_all_kr_tickers() if todo_months else []
+    tickers_label = str(len(full_tickers)) if full_tickers else "not loaded (all skipped)"
+
     logger.info(
-        "[Phase 3] KR snapshots: %d months (%d done, %d remaining), %d tickers/month",
-        len(snapshot_months), skip_n, len(todo_months), len(full_tickers),
+        "[Phase 3] KR snapshots: %d months (%d done, %d remaining), %s tickers/month",
+        len(snapshot_months), skip_n, len(todo_months), tickers_label,
+    )
+    logger.info(
+        "[Phase 3] KR snapshots will skip %d completed months and build %d months",
+        skip_n, len(todo_months),
     )
 
     backfill_dart = BackfillDartProvider(BACKFILL_ROOT / "dart")
     phase_start = time.time()
-
     with tqdm(
-        total=len(todo_months),
+        total=len(snapshot_months),
         desc="[Phase 3] KR snapshots",
         unit="month",
         ncols=110,
         dynamic_ncols=True,
     ) as pbar:
-        for idx, month_str in enumerate(todo_months, 1):
+        todo_idx = 0
+        for month_str, already_done, reasons in month_checks:
             month_t0 = time.time()
+
+            if already_done:
+                done_ratio = f"{pbar.n + 1}/{len(snapshot_months)}"
+                reason_text = "; ".join(reasons) if reasons else "already complete"
+                tqdm.write(f"[Phase 3] ⏭ SKIP {month_str}: {reason_text}")
+                pbar.set_postfix({
+                    "month": month_str,
+                    "status": "skip",
+                    "done": done_ratio,
+                    "reason": reason_text[:40],
+                })
+                pbar.update(1)
+                continue
+
+            todo_idx += 1
             logger.info(
                 "[Phase 3] ▶ START %s (%d/%d, overall %d/%d)",
-                month_str, idx, len(todo_months), skip_n + idx, len(snapshot_months),
+                month_str, todo_idx, len(todo_months), skip_n + todo_idx, len(snapshot_months),
             )
-            pbar.set_postfix({"month": month_str, "done": f"{skip_n + idx}/{len(snapshot_months)}", "status": "running"})
+            done_ratio = f"{pbar.n + 1}/{len(snapshot_months)}"
+            pbar.set_postfix({"month": month_str, "done": done_ratio, "status": "running"})
 
             try:
                 builder = SnapshotBuilder(
@@ -1236,7 +1309,10 @@ async def phase3_kr_snapshots(
                 pbar.update(1)
 
     phase_elapsed = time.time() - phase_start
-    logger.info("[Phase 3] All done — %d months in %.1f min.", len(todo_months), phase_elapsed / 60)
+    logger.info(
+        "[Phase 3] All done — built %d / %d months (%d skipped) in %.1f min.",
+        len(todo_months), len(snapshot_months), skip_n, phase_elapsed / 60,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1274,32 +1350,71 @@ async def phase4_us_snapshots(
         snapshot_months[-1] if snapshot_months else "?",
     )
 
-    todo_months = [
-        m
-        for m in snapshot_months
-        if not _snapshot_dir_complete(artifacts_root / "us" / "snapshots" / m, "us")
-    ]
-    skip_n = len(snapshot_months) - len(todo_months)
+    month_checks: list[tuple[str, bool, list[str]]] = []
+    for month_str in snapshot_months:
+        month_path = artifacts_root / "us" / "snapshots" / month_str
+        done, reasons = _snapshot_completion_status(month_path, "us")
+        month_checks.append((month_str, done, reasons))
+
+    done_months = [entry for entry in month_checks if entry[1]]
+    todo_months = [entry[0] for entry in month_checks if not entry[1]]
+    skip_reason_map: Counter[str] = Counter()
+    for _, _, reasons in done_months:
+        for reason in reasons:
+            skip_reason_map[reason] += 1
+
+    done_n = len(done_months)
+    skip_n = done_n
+    if skip_n > 0:
+        logger.info("[Phase 4] US snapshots skipped: %d", skip_n)
+        for reason, count in skip_reason_map.most_common():
+            logger.info("[Phase 4]   - %s: %d months", reason, count)
+        for month_str, _, reasons in done_months[:20]:
+            tqdm.write(f"[Phase 4] ⏭ SKIP {month_str}: {'; '.join(reasons) or 'already complete'}")
+        if done_n > 20:
+            tqdm.write(f"[Phase 4] ... {done_n - 20} more skipped months (details omitted)")
+
     logger.info(
         "[Phase 4] US snapshots: %d months (%d done, %d remaining), %d tickers/month",
         len(snapshot_months), skip_n, len(todo_months), len(tickers),
     )
+    logger.info(
+        "[Phase 4] US snapshots will skip %d completed months and build %d months",
+        skip_n, len(todo_months),
+    )
     phase_start = time.time()
+    todo_idx = 0
 
     with tqdm(
-        total=len(todo_months),
+        total=len(snapshot_months),
         desc="[Phase 4] US snapshots",
         unit="month",
         ncols=110,
         dynamic_ncols=True,
     ) as pbar:
-        for idx, month_str in enumerate(todo_months, 1):
+        for month_str, already_done, reasons in month_checks:
             month_t0 = time.time()
+
+            if already_done:
+                done_ratio = f"{pbar.n + 1}/{len(snapshot_months)}"
+                reason_text = "; ".join(reasons) if reasons else "already complete"
+                tqdm.write(f"[Phase 4] ⏭ SKIP {month_str}: {reason_text}")
+                pbar.set_postfix({
+                    "month": month_str,
+                    "status": "skip",
+                    "done": done_ratio,
+                    "reason": reason_text[:40],
+                })
+                pbar.update(1)
+                continue
+
+            todo_idx += 1
             logger.info(
                 "[Phase 4] ▶ START %s (%d/%d, overall %d/%d)",
-                month_str, idx, len(todo_months), skip_n + idx, len(snapshot_months),
+                month_str, todo_idx, len(todo_months), skip_n + todo_idx, len(snapshot_months),
             )
-            pbar.set_postfix({"month": month_str, "done": f"{skip_n + idx}/{len(snapshot_months)}", "status": "running"})
+            done_ratio = f"{pbar.n + 1}/{len(snapshot_months)}"
+            pbar.set_postfix({"month": month_str, "done": done_ratio, "status": "running"})
 
             try:
                 providers = create_real_providers()
@@ -1362,7 +1477,10 @@ async def phase4_us_snapshots(
                 pbar.update(1)
 
     phase_elapsed = time.time() - phase_start
-    logger.info("[Phase 4] All done — %d months in %.1f min.", len(todo_months), phase_elapsed / 60)
+    logger.info(
+        "[Phase 4] All done — built %d / %d months (%d skipped) in %.1f min.",
+        len(todo_months), len(snapshot_months), skip_n, phase_elapsed / 60,
+    )
 
 
 # ---------------------------------------------------------------------------

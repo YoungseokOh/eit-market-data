@@ -7,17 +7,25 @@ import csv
 import gzip
 import hashlib
 import json
+import logging
+import re
 import shutil
 import subprocess
 import sys
 import time
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta, timezone
+from io import StringIO
 from pathlib import Path
 from typing import Any
 
 from eit_market_data.kr.ci_safe_provider import NullMacroProvider
-from eit_market_data.kr.dart_provider import DartProvider
+from eit_market_data.kr.dart_provider import (
+    DartProvider,
+    _DART_CACHE_DIR,
+    _DART_CACHE_SIZE_LIMIT,
+)
 from eit_market_data.kr.ecos_provider import EcosMacroProvider
 from eit_market_data.kr.fundamental_provider import CompositeKrFundamentalProvider
 from eit_market_data.kr.market_helpers import fetch_market_cap_frame, normalize_ticker
@@ -49,6 +57,59 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_US_UNIVERSE = "AAPL,MSFT,GOOGL,AMZN,NVDA"
 CURRENT_KR_UNIVERSE_CSV = PROJECT_ROOT / "universes" / "kr_universe.csv"
 NEWS_LOOKBACK_DAYS = 30
+KOSPI200_INDEX_CODE = "1028"
+
+logger = logging.getLogger(__name__)
+
+
+def _next_weekday(value: date) -> date:
+    """Return the next weekday after ``value``."""
+    candidate = value + timedelta(days=1)
+    while candidate.weekday() >= 5:
+        candidate += timedelta(days=1)
+    return candidate
+
+
+def _krx_business_days_between(start: date, end: date) -> list[date]:
+    """Return KRX business days for a bounded range when pykrx can provide them."""
+    try:
+        from eit_market_data.kr.krx_auth import (
+            ensure_krx_authenticated_session,
+            install_pykrx_krx_session_hooks,
+        )
+        from eit_market_data.kr.pykrx_loader import load_pykrx_stock
+
+        stock = load_pykrx_stock()
+        install_pykrx_krx_session_hooks()
+        ensure_krx_authenticated_session(interactive=False)
+        with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            days = stock.get_previous_business_days(
+                fromdate=start.strftime("%Y%m%d"),
+                todate=end.strftime("%Y%m%d"),
+            )
+    except Exception as exc:
+        logger.warning("KRX business-day lookup failed for %s..%s: %s", start, end, exc)
+        return []
+
+    parsed: list[date] = []
+    for item in days:
+        day = item.date() if hasattr(item, "date") else item
+        if isinstance(day, date):
+            parsed.append(day)
+    return sorted(day for day in parsed if start <= day <= end)
+
+
+def _next_kr_execution_date(as_of: date) -> date:
+    """Return the next known KRX trading day, falling back to next weekday.
+
+    pykrx exposes historical/known business days, but it may not return future
+    exchange holidays. For current-day partial bundles, use KRX if available and
+    otherwise avoid the old month-end placeholder by falling back to next weekday.
+    """
+    start = as_of + timedelta(days=1)
+    end = as_of + timedelta(days=14)
+    days = _krx_business_days_between(start, end)
+    return days[0] if days else _next_weekday(as_of)
 
 
 class ValidationError(RuntimeError):
@@ -105,6 +166,80 @@ class KrCollectionState:
         self.news.update(payload.news)
         self.news_audit.update(payload.news_audit)
         self.news_coverage.update(payload.news_coverage)
+
+
+class CacheOnlyDartProvider:
+    """DART provider backed only by the local disk cache.
+
+    Use after a live OpenDART timeout/rate-limit signal so collection can
+    continue without making more OpenDART network requests.
+    """
+
+    def __init__(self, cache_dir: Path = _DART_CACHE_DIR) -> None:
+        try:
+            import diskcache
+
+            self._cache: Any = diskcache.Cache(
+                str(cache_dir),
+                size_limit=_DART_CACHE_SIZE_LIMIT,
+            )
+        except ImportError:
+            self._cache = None
+
+    def _lookup(self, prefix: str, ticker: str, as_of: date) -> Any:
+        if self._cache is None:
+            return None
+        target_ym = as_of.strftime("%Y%m")
+        exact = self._cache.get(f"{prefix}:{ticker}:{target_ym}")
+        if exact is not None:
+            return exact
+
+        latest_key = None
+        for key in self._cache.iterkeys():
+            text = str(key)
+            key_prefix = f"{prefix}:{ticker}:"
+            if not text.startswith(key_prefix):
+                continue
+            ym = text.rsplit(":", 1)[-1]
+            if ym <= target_ym and (latest_key is None or ym > latest_key.rsplit(":", 1)[-1]):
+                latest_key = text
+        return self._cache.get(latest_key) if latest_key is not None else None
+
+    async def fetch_fundamentals(
+        self,
+        ticker: str,
+        as_of: date,
+        n_quarters: int = 8,
+    ) -> FundamentalData:
+        _ = n_quarters
+        cached = self._lookup("fundamental", normalize_ticker(ticker), as_of)
+        if isinstance(cached, FundamentalData):
+            return cached
+        return FundamentalData(ticker=normalize_ticker(ticker))
+
+    async def fetch_filing(self, ticker: str, as_of: date) -> FilingData:
+        cached = self._lookup("filing", normalize_ticker(ticker), as_of)
+        if isinstance(cached, FilingData):
+            return cached
+        return FilingData(ticker=normalize_ticker(ticker))
+
+    async def fetch_issued_shares(self, ticker: str, as_of: date) -> float | None:
+        cached = self._lookup("issued_shares", normalize_ticker(ticker), as_of)
+        return float(cached) if isinstance(cached, (int, float)) and cached > 0 else None
+
+
+def _is_dart_transient_error(exc: Exception) -> bool:
+    text = f"{exc.__class__.__name__}: {exc}"
+    markers = (
+        "ConnectTimeout",
+        "ReadTimeout",
+        "Connection reset",
+        "RemoteDisconnected",
+        "Max retries exceeded",
+        "HTTP 000",
+        "temporarily unavailable",
+    )
+    return any(marker in text for marker in markers)
 
 
 def _now_utc() -> str:
@@ -228,7 +363,9 @@ def _listing_metadata_frame() -> Any:
         normalized["sector"] = industry.where(industry != "", sector).fillna("").astype(str)
         normalized = normalized.loc[normalized["market"].isin({"KOSPI", "KOSDAQ"})]
         if not normalized.empty:
-            return normalized[["ticker", "name", "market", "sector"]].drop_duplicates("ticker")
+            return _merge_seed_listing_metadata(
+                normalized[["ticker", "name", "market", "sector"]]
+            )
 
     frames = []
     for market in ("KOSPI", "KOSDAQ"):
@@ -244,7 +381,182 @@ def _listing_metadata_frame() -> Any:
 
     if not frames:
         raise RuntimeError("No KR listing metadata available from FinanceDataReader.")
-    return pd.concat(frames, ignore_index=True).drop_duplicates("ticker")
+    return _merge_seed_listing_metadata(pd.concat(frames, ignore_index=True))
+
+
+def _merge_seed_listing_metadata(frame: Any) -> Any:
+    import pandas as pd
+
+    frames = [frame]
+    if CURRENT_KR_UNIVERSE_CSV.exists():
+        try:
+            seed = pd.read_csv(CURRENT_KR_UNIVERSE_CSV, dtype={"ticker": str})
+        except Exception:
+            seed = None
+        if seed is not None and not seed.empty and "ticker" in seed.columns:
+            normalized = seed.copy()
+            normalized["ticker"] = normalized["ticker"].astype(str).map(normalize_ticker)
+            for column in ("name", "market", "sector"):
+                if column not in normalized.columns:
+                    normalized[column] = ""
+            frames.append(normalized[["ticker", "name", "market", "sector"]])
+
+    return pd.concat(frames, ignore_index=True).drop_duplicates("ticker", keep="first")
+
+
+def _snapshot_market_cap_frame(as_of: date) -> Any | None:
+    """Load market-cap candidates from an existing same-month KR snapshot."""
+    import pandas as pd
+
+    month = as_of.strftime("%Y-%m")
+    candidates = (
+        PROJECT_ROOT / "artifacts" / "kr" / "snapshots" / month / "snapshot.json",
+        PROJECT_ROOT / "artifacts" / "snapshots" / month / "snapshot.json",
+    )
+    snapshot_path = next((path for path in candidates if path.exists()), None)
+    if snapshot_path is None:
+        return None
+
+    try:
+        snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+    rows: list[dict[str, Any]] = []
+    fundamentals = snapshot.get("fundamentals", {})
+    for ticker, payload in fundamentals.items():
+        market_cap = payload.get("market_cap") if isinstance(payload, dict) else None
+        if market_cap is None:
+            continue
+        rows.append(
+            {
+                "ticker": normalize_ticker(str(ticker)),
+                "market_cap": market_cap,
+            }
+        )
+
+    if not rows:
+        return None
+    return pd.DataFrame(rows)
+
+
+def _market_cap_candidates_for_market(as_of: date, market: str) -> Any | None:
+    import pandas as pd
+
+    frame = fetch_market_cap_frame(as_of, market)
+    if frame is None or frame.empty:
+        return None
+    working = frame.reset_index() if "종목코드" not in frame.columns else frame.reset_index(drop=True)
+    if "종목코드" not in working.columns or "시가총액" not in working.columns:
+        return None
+    result = pd.DataFrame(
+        {
+            "ticker": working["종목코드"].astype(str).map(normalize_ticker),
+            "market_cap": pd.to_numeric(working["시가총액"], errors="coerce"),
+        }
+    )
+    if "종목명" in working.columns:
+        result["cap_name"] = working["종목명"].fillna("").astype(str).str.strip()
+    return result
+
+
+def _fetch_kospi200_tickers_from_pykrx(as_of: date) -> list[str]:
+    try:
+        from eit_market_data.kr.pykrx_loader import load_pykrx_stock
+    except Exception as exc:
+        logger.warning("KOSPI200 pykrx source unavailable: %s", exc)
+        return []
+
+    try:
+        stock = load_pykrx_stock()
+        tickers = stock.get_index_portfolio_deposit_file(
+            KOSPI200_INDEX_CODE,
+            as_of.strftime("%Y%m%d"),
+            alternative=True,
+        )
+    except Exception as exc:
+        logger.warning("KOSPI200 pykrx fetch failed for %s: %s", as_of, exc)
+        return []
+
+    if tickers is None:
+        return []
+    return [normalize_ticker(ticker) for ticker in tickers if str(ticker).strip()]
+
+
+def _fetch_kospi200_rows_from_naver_current() -> list[dict[str, str]]:
+    import requests
+
+    rows: list[dict[str, str]] = []
+    headers = {"User-Agent": "Mozilla/5.0"}
+    for page in range(1, 21):
+        url = f"https://finance.naver.com/sise/entryJongmok.naver?&page={page}"
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        response.encoding = "euc-kr"
+        matches = re.findall(
+            r'<td class="ctg"><a href="/item/main\.naver\?code=([0-9A-Za-z]{6})"[^>]*>(.*?)</a></td>',
+            response.text,
+        )
+        for ticker, name in matches:
+            rows.append(
+                {
+                    "ticker": normalize_ticker(ticker),
+                    "name": re.sub(r"<[^>]+>", "", name).strip(),
+                }
+            )
+    deduped: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for row in rows:
+        ticker = row["ticker"]
+        if ticker in seen:
+            continue
+        seen.add(ticker)
+        deduped.append(row)
+    return deduped
+
+
+def _build_kospi200_records(as_of: date, meta: Any) -> Any:
+    import pandas as pd
+
+    source = "krx_pykrx"
+    source_as_of = as_of.isoformat()
+    rows = [{"ticker": ticker, "source_name": ""} for ticker in _fetch_kospi200_tickers_from_pykrx(as_of)]
+
+    if len(rows) != 200:
+        logger.warning(
+            "KOSPI200 official pykrx source returned %d rows for %s; using Naver current fallback.",
+            len(rows),
+            as_of,
+        )
+        source = "naver_current_fallback"
+        source_as_of = date.today().isoformat()
+        rows = [
+            {"ticker": row["ticker"], "source_name": row.get("name", "")}
+            for row in _fetch_kospi200_rows_from_naver_current()
+        ]
+
+    if len(rows) != 200:
+        raise RuntimeError(f"KOSPI200 universe source returned {len(rows)} rows; expected 200.")
+
+    records = pd.DataFrame(rows)
+    cap_frame = _market_cap_candidates_for_market(as_of, "KOSPI")
+    if cap_frame is not None and not cap_frame.empty:
+        records = records.merge(cap_frame, on="ticker", how="left")
+    else:
+        records["market_cap"] = None
+
+    records = records.merge(meta, on="ticker", how="left")
+    records["market"] = records["market"].fillna("KOSPI")
+    records["sector"] = records["sector"].fillna("")
+    records["name"] = records["name"].fillna("")
+    if "source_name" in records.columns:
+        records["name"] = records["name"].where(records["name"] != "", records["source_name"])
+    if "cap_name" in records.columns:
+        records["name"] = records["name"].where(records["name"] != "", records["cap_name"].fillna(""))
+    records["rank"] = range(1, len(records) + 1)
+    records["source"] = source
+    records["source_as_of"] = source_as_of
+    return records
 
 
 def build_local_universe_manifest(
@@ -258,28 +570,22 @@ def build_local_universe_manifest(
     kind = kind.lower()
     meta = _listing_metadata_frame()
 
-    if kind != "full":
+    if kind == "kospi200":
+        records = _build_kospi200_records(as_of, meta)
+    elif kind != "full":
         if not kind.startswith("top"):
             raise ValueError(f"Unsupported universe kind: {kind}")
         top_n = int(kind.removeprefix("top"))
         cap_frames = []
         for market in ("KOSPI", "KOSDAQ"):
-            frame = fetch_market_cap_frame(as_of, market)
-            if frame is None or frame.empty:
-                continue
-            working = frame.reset_index() if "종목코드" not in frame.columns else frame.reset_index(drop=True)
-            if "종목코드" not in working.columns or "시가총액" not in working.columns:
-                continue
-            cap_frames.append(
-                pd.DataFrame(
-                    {
-                        "ticker": working["종목코드"].astype(str).map(normalize_ticker),
-                        "market_cap": pd.to_numeric(working["시가총액"], errors="coerce"),
-                    }
-                )
-            )
+            frame = _market_cap_candidates_for_market(as_of, market)
+            if frame is not None and not frame.empty:
+                cap_frames.append(frame[["ticker", "market_cap"]])
         if not cap_frames:
             raise RuntimeError(f"Market-cap data unavailable for {kind} universe generation.")
+        snapshot_cap_frame = _snapshot_market_cap_frame(as_of)
+        if snapshot_cap_frame is not None and not snapshot_cap_frame.empty:
+            cap_frames.append(snapshot_cap_frame)
         cap_frame = (
             pd.concat(cap_frames, ignore_index=True)
             .dropna(subset=["market_cap"])
@@ -296,7 +602,10 @@ def build_local_universe_manifest(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     records["as_of"] = as_of.isoformat()
-    ordered = records[["ticker", "market", "sector", "name", "market_cap", "rank", "as_of"]]
+    columns = ["ticker", "market", "sector", "name", "market_cap", "rank", "as_of"]
+    if kind == "kospi200":
+        columns.extend(["source", "source_as_of"])
+    ordered = records[columns]
     ordered.to_csv(output_path, index=False, encoding="utf-8")
     return output_path
 
@@ -547,14 +856,15 @@ async def validate_kr_checkpoint(
 
     for ticker, fund in state.fundamentals.items():
         if not fund.quarters:
-            checks.append(ValidationCheck(f"kr:fundamentals:{ticker}", "failed", "empty"))
+            status = "degraded" if fund.market_cap is not None or fund.last_close_price is not None else "failed"
+            checks.append(ValidationCheck(f"kr:fundamentals:{ticker}", status, "missing_quarters"))
             continue
         if any(quarter.report_date > as_of for quarter in fund.quarters):
             checks.append(ValidationCheck(f"kr:fundamentals:{ticker}", "failed", "future_report_date"))
 
     for ticker, filing in state.filings.items():
         if not filing.business_overview:
-            checks.append(ValidationCheck(f"kr:filing:{ticker}", "failed", "missing_business_overview"))
+            checks.append(ValidationCheck(f"kr:filing:{ticker}", "degraded", "missing_business_overview"))
             continue
         if filing.filing_date is not None and filing.filing_date > as_of:
             checks.append(ValidationCheck(f"kr:filing:{ticker}", "failed", "future_filing_date"))
@@ -667,6 +977,7 @@ class LocalKrCollector:
         checkpoint_root: Path,
         policy: CheckpointPolicy,
         progress_path: Path,
+        dart_mode: str = "live",
     ) -> None:
         self.as_of = as_of
         self.month = as_of.strftime("%Y-%m")
@@ -676,8 +987,11 @@ class LocalKrCollector:
         self.checkpoint_root = checkpoint_root
         self.policy = policy
         self.progress_path = progress_path
-        self.inter_ticker_delay_seconds = 4.0
-        self.dart = DartProvider(allow_stale_fallback=False, raise_on_error=True)
+        self.inter_ticker_delay_seconds = 0.0 if dart_mode == "cache_only" else 4.0
+        if dart_mode == "cache_only":
+            self.dart = CacheOnlyDartProvider()
+        else:
+            self.dart = DartProvider(allow_stale_fallback=False, raise_on_error=True)
         self.pykrx = PykrxProvider(official_only=True)
         self.fundamentals = CompositeKrFundamentalProvider(
             dart_provider=self.dart,
@@ -689,6 +1003,51 @@ class LocalKrCollector:
             self.macro_provider: Any = EcosMacroProvider()
         except Exception:
             self.macro_provider = NullMacroProvider()
+
+    def _switch_dart_cache_only(self, reason: Exception) -> None:
+        if isinstance(self.dart, CacheOnlyDartProvider):
+            return
+        logger.warning("Switching DART provider to cache-only mode: %s", reason)
+        self.dart = CacheOnlyDartProvider()
+        self.fundamentals = CompositeKrFundamentalProvider(
+            dart_provider=self.dart,
+            price_provider=self.pykrx,
+            raise_on_error=True,
+        )
+        self.pykrx._fundamental_provider = self.fundamentals
+
+    async def _fetch_fundamentals_with_fallback(self, ticker: str) -> FundamentalData:
+        try:
+            return await self.fundamentals.fetch_fundamentals(
+                ticker,
+                self.as_of,
+                n_quarters=8,
+            )
+        except Exception as exc:
+            logger.warning(
+                "DART fundamentals unavailable for %s as of %s: %s",
+                ticker,
+                self.as_of,
+                exc,
+            )
+            if _is_dart_transient_error(exc):
+                self._switch_dart_cache_only(exc)
+                return await self.fundamentals.fetch_fundamentals(
+                    ticker,
+                    self.as_of,
+                    n_quarters=8,
+                )
+
+            cache_only_fundamentals = CompositeKrFundamentalProvider(
+                dart_provider=CacheOnlyDartProvider(),
+                price_provider=self.pykrx,
+                raise_on_error=True,
+            )
+            return await cache_only_fundamentals.fetch_fundamentals(
+                ticker,
+                self.as_of,
+                n_quarters=8,
+            )
 
     async def collect(
         self,
@@ -844,8 +1203,12 @@ class LocalKrCollector:
             news_coverage={},
         )
         prices = await self.pykrx.fetch_prices(ticker, self.as_of, lookback_days=300)
-        fundamentals = await self.fundamentals.fetch_fundamentals(ticker, self.as_of, n_quarters=8)
-        filing = await self.dart.fetch_filing(ticker, self.as_of)
+        fundamentals = await self._fetch_fundamentals_with_fallback(ticker)
+        try:
+            filing = await self.dart.fetch_filing(ticker, self.as_of)
+        except Exception as exc:
+            logger.warning("DART filing unavailable for %s as of %s: %s", ticker, self.as_of, exc)
+            filing = FilingData(ticker=ticker)
         payload.prices[ticker] = prices
         payload.fundamentals[ticker] = fundamentals
         payload.filings[ticker] = filing
@@ -863,9 +1226,7 @@ class LocalKrCollector:
         macro: MacroData,
         benchmark_prices: list[PriceBar],
     ) -> MonthlySnapshot:
-        execution_date = _next_month(self.as_of)
-        while execution_date.weekday() >= 5:
-            execution_date += timedelta(days=1)
+        execution_date = _next_kr_execution_date(self.as_of)
 
         metadata = SnapshotMetadata(
             created_at=datetime.utcnow().isoformat(),
@@ -976,6 +1337,7 @@ def run_local_collection(
     start: date | None = None,
     resume: bool = False,
     us_universe: str = DEFAULT_US_UNIVERSE,
+    dart_mode: str = "live",
 ) -> Path:
     storage_root = storage_root.expanduser().resolve()
     storage_root.mkdir(parents=True, exist_ok=True)
@@ -993,6 +1355,7 @@ def run_local_collection(
             "market": market,
             "phase": phase,
             "full_universe_kind": full_universe_kind,
+            "dart_mode": dart_mode,
             "stages": {},
         },
     )
@@ -1017,10 +1380,11 @@ def run_local_collection(
                 raw_start=raw_start,
                 run_root=run_root,
                 universe_csv=pilot_universe,
-                progress_path=progress_path,
-                resume=resume,
-                policy=CheckpointPolicy(every_tickers=5, every_seconds=180),
-            )
+                    progress_path=progress_path,
+                    resume=resume,
+                    policy=CheckpointPolicy(every_tickers=5, every_seconds=180),
+                    dart_mode=dart_mode,
+                )
 
         if market in {"us", "both"} and phase in {"pilot", "all"}:
             _run_us_phase(
@@ -1042,6 +1406,7 @@ def run_local_collection(
                     progress_path=progress_path,
                     resume=resume,
                     policy=CheckpointPolicy(every_tickers=25, every_seconds=600),
+                    dart_mode=dart_mode,
                 )
             if market in {"us", "both"}:
                 _run_us_phase(
@@ -1069,6 +1434,7 @@ async def _run_kr_phase(
     progress_path: Path,
     resume: bool,
     policy: CheckpointPolicy,
+    dart_mode: str,
 ) -> None:
     progress = load_progress(progress_path, {})
     stages = progress.setdefault("stages", {})
@@ -1082,15 +1448,15 @@ async def _run_kr_phase(
             name=raw_stage_key,
             command=[
                 sys.executable,
-                "scripts/crawl_kr_data_fallback.py",
+                "scripts/crawl_kr_data_pykrx.py",
                 "--start",
                 raw_start.isoformat(),
                 "--end",
                 as_of.isoformat(),
-                "--universe-csv",
-                str(universe_csv),
                 "--output-root",
                 str(raw_root),
+                "--skip-meta",
+                "--skip-ohlcv",
             ],
             log_path=run_root / "logs" / f"{raw_stage_key}.log",
         )
@@ -1108,6 +1474,7 @@ async def _run_kr_phase(
         checkpoint_root=run_root / "reports" / "kr" / stage_name,
         policy=policy,
         progress_path=run_root / "reports" / "kr" / f"{stage_name}_progress.json",
+        dart_mode=dart_mode,
     )
     summary = await collector.collect(universe_csv=universe_csv, resume=resume)
     stages[bundle_stage_key] = {"status": "completed", "summary": summary}

@@ -142,3 +142,108 @@ python scripts/fetch_pykrx_all.py --date 2024-01-31 --output data/
 ```
 
 자세한 사용법은 `scripts/fetch_pykrx_all.py` 참고.
+
+## KOSPI200 유니버스
+
+`top200`은 KOSPI/KOSDAQ 전체 시가총액 상위 200개이고, `kospi200`은 KRX KOSPI200 지수 구성종목이다.
+두 기준은 서로 다르므로 리서치용 KOSPI200 번들은 반드시 별도 유니버스 파일을 사용한다.
+
+```bash
+python scripts/build_local_universe.py \
+  --as-of 2025-12-31 \
+  --kind kospi200 \
+  --output universes/kr_kospi200_2025-12-31.csv
+```
+
+생성 경로는 KRX/pykrx `get_index_portfolio_deposit_file("1028", as_of)`를 우선 사용한다.
+KRX 세션이 `LOGOUT` 등으로 구성종목을 반환하지 못하면 Naver KOSPI200 현재 구성으로 fallback 하며,
+이 경우 CSV의 `source`와 `source_as_of` 컬럼에 `naver_current_fallback` 및 수집일이 기록된다.
+과거 시점 백테스트에서는 이 fallback 파일을 point-in-time 공식 원천으로 간주하지 않는다.
+
+## Local KOSPI200 수집 runbook
+
+KRX/pykrx가 정상이고 KOSPI200 기준으로 현재 연도 데이터를 만들 때는
+`run_local_collection.py`를 사용한다. 이 경로는 KOSPI200 universe를 만들고,
+official pykrx raw 월말 자료를 수집한 뒤, KOSPI200 bundle을 생성한다.
+
+```bash
+AS_OF=YYYY-MM-DD
+YEAR_START=YYYY-01-01
+RUN_LABEL=kr_<period>_official
+
+python scripts/preflight_kr_data.py --as-of "$AS_OF" --ticker 005930 --skip-news
+
+python scripts/run_local_collection.py \
+  --storage-root "out/$RUN_LABEL" \
+  --as-of "$AS_OF" \
+  --market kr \
+  --phase full \
+  --full-universe-kind kospi200 \
+  --start "$YEAR_START"
+```
+
+raw 단계는 공식 pykrx collector를 사용한다:
+
+```bash
+scripts/crawl_kr_data_pykrx.py --start "$YEAR_START" --end "$AS_OF" --skip-meta --skip-ohlcv
+```
+
+이 collector는 project `.env`를 로드해 `KRX_ID`/`KRX_PW`를 pykrx에 전달해야 한다.
+값이 빠지면 KRX 인증 실패가 `종가`, `BPS`, `PER`, `지수명` 컬럼 오류처럼 보일 수 있다.
+그 경우 schema를 먼저 바꾸지 말고 `preflight_kr_data.py --skip-news`로 공식 pykrx 경로를 확인한다.
+
+`--skip-meta`는 KOSPI200 universe가 이미 이름/섹터를 갖고 있을 때 불필요한 종목명 호출을 줄이기 위한 옵션이고,
+`--skip-ohlcv`는 전체 KOSPI/KOSDAQ 개별 OHLCV raw 덤프를 피하기 위한 옵션이다.
+KOSPI200 개별 가격은 bundle 단계에서 `PykrxProvider`가 300 거래일 lookback으로 수집한다.
+
+부분 현재월 bundle을 만들 때는 `decision_date`를 실제 `--as-of`로 유지한다. `execution_date`는
+`run_local_collection.py`가 KRX/pykrx의 알려진 business day를 우선 사용해 `decision_date` 이후
+첫 거래일로 잡고, KRX가 미래 거래일을 아직 반환하지 못하면 다음 weekday로 fallback한다.
+완료 월이 아닌 partial bundle에서 월말/다음달 placeholder를 쓰면 point-in-time 계약 위반이다.
+
+DART는 KRX/pykrx market data를 막는 gate가 아니라 재무/공시 enrichment다. KOSPI200/전체 종목을
+live DART로 넓게 반복 실행하지 않는다. live DART가 필요한 경우에는 explicit universe 또는
+실패 ticker 목록을 대상으로, cached ticker/month skip, ticker당 `5s+` delay, progress/resume,
+transient error 즉시 중단 조건을 갖춘 cache backfill만 사용한다.
+
+OpenDART가 broad run 중 timeout을 내면 live DART를 계속 재시도하지 말고 cache-only로 재개한다:
+
+```bash
+python scripts/run_local_collection.py \
+  --storage-root "out/$RUN_LABEL" \
+  --as-of "$AS_OF" \
+  --market kr \
+  --phase full \
+  --full-universe-kind kospi200 \
+  --start "$YEAR_START" \
+  --resume \
+  --dart-mode cache_only
+```
+
+성공 후 확인할 파일:
+
+- `out/<label>/runs/YYYY-MM-DD/kr_full_kospi200/progress.json`
+- `out/<label>/runs/YYYY-MM-DD/kr_full_kospi200/reports/full_kr_raw.json`
+- `out/<label>/runs/YYYY-MM-DD/kr_full_kospi200/bundles/kr/full/snapshots/YYYY-MM/summary.json`
+- `out/<label>/runs/YYYY-MM-DD/kr_full_kospi200/bundles/kr/full/snapshots/YYYY-MM/validation_report.json`
+
+coverage를 보고할 때는 `fundamental_tickers`/`filing_tickers`만 보지 말고
+`quarters_nonempty`, `filing_text_nonempty`, `market_cap_nonnull`, `last_close_nonnull`을 별도로 계산한다.
+
+### 검증 결과 보고 기준
+
+검증 결과는 현재 run root의 파일을 근거로 보고한다. 날짜별 예전 run을 기본값처럼 문서에
+박아두지 않는다.
+
+필수 확인 항목:
+
+- raw pykrx: `cap_daily`, `fundamental`, `index`, `sector` 파일 수
+- raw validation: `failed=0`, `degraded` 사유
+- bundle validation: `failed=0`, `degraded` 사유
+- KOSPI200 universe: `200`
+- price coverage: `price_tickers`, last date `<= decision_date`
+- market cap / last close: `market_cap_nonnull`, `last_close_nonnull`
+- benchmark: `benchmark_bars`, last date `<= decision_date`
+- sector map coverage
+- DART actual coverage: `quarters_nonempty`, `filing_text_nonempty`
+- latest DART quarters among non-empty tickers
