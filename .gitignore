@@ -44,3 +44,6 @@ htmlcov/
 .ruff_cache/
 docs_cache/
 uv.lock
+
+# local launchd wrapper logs
+logs/
