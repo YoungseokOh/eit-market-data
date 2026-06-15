@@ -1,8 +1,9 @@
 name: Daily Market Data
 
+# Scheduling moved off GitHub Actions to the Mac Mini launchd agent
+# (com.eit.market-data.daily, Mon-Fri 07:30 KST) to avoid hosted-runner
+# billing. This workflow is kept only as a manual self-hosted fallback.
 on:
-  schedule:
-    - cron: "30 22 * * 0-4"
   workflow_dispatch:
 
 permissions:
