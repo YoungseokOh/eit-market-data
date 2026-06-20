@@ -18,6 +18,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SEOUL = ZoneInfo("Asia/Seoul")
 UNIVERSE_CSV = PROJECT_ROOT / "universes/kr_universe.csv"
 OUTPUT_ROOT = PROJECT_ROOT / "out"
+# Stable, month-accumulating bundle tree consumed by eit-research.
+# Per-run logs/data stay under out/<run>/; snapshots land here once, by market.
+BUNDLE_ROOT = PROJECT_ROOT / "artifacts"
 
 
 @dataclass
@@ -104,8 +107,10 @@ def assess_crawl_outputs(data_dir: Path) -> list[str]:
     return missing
 
 
-def inspect_snapshot_step(artifacts_dir: Path, as_of: date) -> tuple[str, str]:
-    summary_path = artifacts_dir / "snapshots" / as_of.strftime("%Y-%m") / "summary.json"
+def inspect_snapshot_step(bundle_root: Path, as_of: date, market_subdir: str) -> tuple[str, str]:
+    summary_path = (
+        bundle_root / market_subdir / "snapshots" / as_of.strftime("%Y-%m") / "summary.json"
+    )
     if not summary_path.exists():
         return "ok", ""
     try:
@@ -126,13 +131,13 @@ def run_daily_batch(
     ticker: str,
     force_snapshot: bool,
     snapshot_profile: str,
+    bundle_root: Path = BUNDLE_ROOT,
     us_universe: str = "AAPL,MSFT,GOOGL,AMZN,NVDA",
     skip_us: bool = False,
 ) -> tuple[int, dict[str, object]]:
     run_root = build_run_root(output_root, as_of)
     logs_dir = run_root / "logs"
     data_dir = run_root / "data"
-    artifacts_dir = run_root / "artifacts"
 
     started_at = datetime.now(timezone.utc).isoformat()
     step_results: list[StepResult] = []
@@ -191,7 +196,9 @@ def run_daily_batch(
             "--universe-csv",
             str(universe_csv),
             "--artifacts-root",
-            str(artifacts_dir),
+            str(bundle_root),
+            "--market-subdir",
+            "kr",
             "--profile",
             snapshot_profile,
         ]
@@ -204,7 +211,7 @@ def run_daily_batch(
         elif snapshot.status == "degraded":
             overall_status = "degraded"
         else:
-            snapshot_status, snapshot_detail = inspect_snapshot_step(artifacts_dir, as_of)
+            snapshot_status, snapshot_detail = inspect_snapshot_step(bundle_root, as_of, "kr")
             snapshot.status = snapshot_status
             snapshot.detail = snapshot_detail
 
@@ -218,7 +225,9 @@ def run_daily_batch(
             "--universe",
             us_universe,
             "--artifacts-root",
-            str(artifacts_dir),
+            str(bundle_root),
+            "--market-subdir",
+            "us",
         ]
         us_snapshot = run_step("build_us_snapshot", us_snapshot_cmd, logs_dir)
         step_results.append(us_snapshot)
@@ -232,6 +241,7 @@ def run_daily_batch(
         "started_at": started_at,
         "ended_at": ended_at,
         "run_root": display_path(run_root),
+        "bundle_root": display_path(bundle_root),
         "steps": [asdict(step) for step in step_results],
     }
     write_summary(run_root / "summary.json", payload)
@@ -283,6 +293,11 @@ def main() -> None:
         action="store_true",
         help="Skip US snapshot build (KR only).",
     )
+    parser.add_argument(
+        "--bundle-root",
+        default=str(BUNDLE_ROOT),
+        help="Stable bundle tree consumed by eit-research (snapshots/<market>/...).",
+    )
     args = parser.parse_args()
 
     exit_code, summary = run_daily_batch(
@@ -292,6 +307,7 @@ def main() -> None:
         ticker=args.ticker,
         force_snapshot=args.force_snapshot,
         snapshot_profile=args.snapshot_profile,
+        bundle_root=Path(args.bundle_root),
         us_universe=args.us_universe,
         skip_us=args.skip_us,
     )
