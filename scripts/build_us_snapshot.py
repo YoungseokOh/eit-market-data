@@ -83,12 +83,15 @@ async def build_us_snapshot(
         builder = SnapshotBuilder(**providers)
         config = SnapshotConfig(artifacts_dir=str(effective_root))
 
-        # Build snapshot
+        # Build snapshot. Pin decision_date to the exact as_of so mid-month
+        # runs are not mislabeled as month-end (point-in-time correctness,
+        # mirroring scripts/build_kr_snapshot.py).
         month_str = as_of.strftime("%Y-%m")
         snapshot = await builder.build(
             month=month_str,
             universe=universe,
             config=config,
+            decision_date=as_of,
         )
 
         logger.info(f"Snapshot built: {len(universe)} tickers, decision_date={snapshot.decision_date}")
