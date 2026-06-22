@@ -234,6 +234,31 @@ def run_daily_batch(
         if us_snapshot.status == "failed":
             overall_status = "degraded"  # US failure is degraded, not failed
 
+    # Refresh the per-ticker daily OHLCV price store every run (NOT month-gated,
+    # unlike the snapshot bundle). The store universe is derived from the
+    # published bundles so it stays consistent with them; the live provider
+    # appends only trading days after the latest bundle. A store failure is
+    # degrading, never fatal.
+    if overall_status != "failed":
+        store_markets = ["kr"] if skip_us else ["kr", "us"]
+        for store_market in store_markets:
+            store_cmd = [
+                sys.executable,
+                "scripts/build_daily_price_store.py",
+                "--market",
+                store_market,
+                "--artifacts-root",
+                str(bundle_root),
+                "--source",
+                "auto",
+                "--end",
+                as_of.isoformat(),
+            ]
+            store_step = run_step(f"daily_price_store_{store_market}", store_cmd, logs_dir)
+            step_results.append(store_step)
+            if store_step.status == "failed" and overall_status == "ok":
+                overall_status = "degraded"
+
     ended_at = datetime.now(timezone.utc).isoformat()
     payload = {
         "status": overall_status,
