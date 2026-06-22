@@ -146,6 +146,13 @@ def run(args: argparse.Namespace) -> int:
         raise ValueError(f"--filing-mode must be one of {sorted(FILING_MODES)}")
 
     as_of = date.fromisoformat(args.as_of)
+    # NOTE: DART cache entries are bucketed by the *collection* month (this as_of),
+    # not by the filing's real rcept_dt. A bucket can therefore hold a record whose
+    # real filing_date/report_date is after as_of (e.g. an annual report first seen
+    # during a later collection run). Point-in-time correctness is enforced at read
+    # time by DartProvider / CacheOnlyDartProvider, which validate each record's own
+    # date against as_of; the bucket month is only a coarse pre-filter. Do not treat
+    # the bucket month as the authoritative as-of of the record it contains.
     ym = as_of.strftime("%Y%m")
     tickers = _load_tickers(args.universe_csv)
     cache = diskcache.Cache(str(args.cache_dir), size_limit=_DART_CACHE_SIZE_LIMIT)

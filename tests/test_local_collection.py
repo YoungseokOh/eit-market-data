@@ -538,3 +538,92 @@ def test_build_local_universe_manifest_kospi200_falls_back_to_naver_current(
     assert frame.loc[0, "ticker"] == "0126Z0"
     assert frame.loc[0, "name"] == "삼성에피스홀딩스"
     assert frame["source"].unique().tolist() == ["naver_current_fallback"]
+
+
+class _FakeCache:
+    """Minimal diskcache stand-in exposing get() and iterkeys()."""
+
+    def __init__(self, data: dict[str, object]) -> None:
+        self._data = dict(data)
+
+    def get(self, key: str) -> object:
+        return self._data.get(key)
+
+    def iterkeys(self):  # noqa: ANN201 - mirrors diskcache.Cache API
+        return iter(self._data.keys())
+
+
+def _cache_only_provider(data: dict[str, object]) -> local_collection.CacheOnlyDartProvider:
+    provider = local_collection.CacheOnlyDartProvider.__new__(
+        local_collection.CacheOnlyDartProvider
+    )
+    provider._cache = _FakeCache(data)
+    return provider
+
+
+def test_cache_only_filing_drops_future_dated_record():
+    # Cache holds ONLY the FY2025 annual report physically filed 2026-03-18,
+    # bucketed under collection months 202603..202606 (no January bucket).
+    future_filing = FilingData(
+        ticker="000080",
+        filing_date=date(2026, 3, 18),
+        filing_type="사업보고서",
+        business_overview="FY2025 annual report body",
+    )
+    data = {f"filing:000080:2026{mm:02d}": future_filing for mm in (3, 4, 5, 6)}
+    provider = _cache_only_provider(data)
+
+    # As of 2026-01-30 the March filing is in the FUTURE -> must NOT be returned.
+    jan = asyncio.run(provider.fetch_filing("000080", date(2026, 1, 30)))
+    assert jan.filing_date is None
+    assert jan.business_overview is None
+    assert jan.ticker == "000080"
+
+    # As of a date on/after the real filing_date it becomes valid again.
+    apr = asyncio.run(provider.fetch_filing("000080", date(2026, 4, 30)))
+    assert apr.filing_date == date(2026, 3, 18)
+    assert apr.business_overview == "FY2025 annual report body"
+
+
+def test_cache_only_filing_prefers_latest_valid_filing():
+    older = FilingData(
+        ticker="000080",
+        filing_date=date(2025, 3, 20),
+        filing_type="사업보고서",
+        business_overview="FY2024 annual report",
+    )
+    newer = FilingData(
+        ticker="000080",
+        filing_date=date(2026, 3, 18),
+        filing_type="사업보고서",
+        business_overview="FY2025 annual report",
+    )
+    data = {
+        "filing:000080:202503": older,
+        "filing:000080:202603": newer,
+    }
+    provider = _cache_only_provider(data)
+
+    # 2026-02: only the FY2024 report (2025-03-20) qualifies.
+    feb = asyncio.run(provider.fetch_filing("000080", date(2026, 2, 27)))
+    assert feb.filing_date == date(2025, 3, 20)
+
+    # 2026-04: the newer FY2025 report (2026-03-18) is now valid and preferred.
+    apr = asyncio.run(provider.fetch_filing("000080", date(2026, 4, 30)))
+    assert apr.filing_date == date(2026, 3, 18)
+
+
+def test_cache_only_fundamentals_drops_future_quarters():
+    quarters = [
+        QuarterlyFinancials(fiscal_quarter="2025Q4", report_date=date(2026, 5, 15), revenue=10.0),
+        QuarterlyFinancials(fiscal_quarter="2025Q3", report_date=date(2025, 11, 14), revenue=9.0),
+        QuarterlyFinancials(fiscal_quarter="2025Q2", report_date=date(2025, 8, 13), revenue=8.0),
+    ]
+    fund = FundamentalData(ticker="000080", quarters=quarters, market_cap=123.0)
+    provider = _cache_only_provider({"fundamental:000080:202601": fund})
+
+    out = asyncio.run(provider.fetch_fundamentals("000080", date(2026, 1, 30)))
+    report_dates = [q.report_date for q in out.quarters]
+    assert date(2026, 5, 15) not in report_dates
+    assert report_dates == [date(2025, 11, 14), date(2025, 8, 13)]
+    assert out.market_cap == 123.0  # non-date fields preserved

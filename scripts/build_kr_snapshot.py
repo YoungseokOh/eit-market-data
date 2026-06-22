@@ -53,6 +53,7 @@ async def build_snapshot(
     artifacts_root: Path,
     profile: str,
     market_subdir: str = "",
+    dart_mode: str = "live",
 ) -> dict[str, object]:
     from eit_market_data.snapshot import SnapshotBuilder, SnapshotConfig, create_kr_providers
 
@@ -62,8 +63,19 @@ async def build_snapshot(
     # When market_subdir is set, nest artifacts under that subdirectory
     effective_root = artifacts_root / market_subdir if market_subdir else artifacts_root
 
+    # cache_only routes DART fundamentals/filings through the offline disk cache
+    # (no OpenDART network calls — see .claude/rules/dart-api-limits.md). The
+    # CacheOnlyDartProvider enforces the point-in-time invariant per record.
+    dart_override = None
+    if dart_mode == "cache_only":
+        from eit_market_data.local_collection import CacheOnlyDartProvider
+
+        dart_override = CacheOnlyDartProvider()
+
     builder = SnapshotBuilder(
-        **create_kr_providers(profile=profile, universe_csv=universe_csv)
+        **create_kr_providers(
+            profile=profile, universe_csv=universe_csv, dart_override=dart_override
+        )
     )
     snapshot = await builder.build_and_persist(
         month,
@@ -201,6 +213,13 @@ def main() -> None:
         default="",
         help="Optional market subdirectory under snapshots/ (e.g. 'kr').",
     )
+    parser.add_argument(
+        "--dart-mode",
+        default="live",
+        choices=["live", "cache_only"],
+        help="DART source. cache_only replays the offline disk cache without any "
+        "OpenDART network calls (point-in-time enforced per record).",
+    )
     args = parser.parse_args()
 
     as_of = date.fromisoformat(args.as_of)
@@ -224,7 +243,9 @@ def main() -> None:
         return
 
     summary = asyncio.run(
-        build_snapshot(as_of, universe_csv, artifacts_root, args.profile, args.market_subdir)
+        build_snapshot(
+            as_of, universe_csv, artifacts_root, args.profile, args.market_subdir, args.dart_mode
+        )
     )
     print(
         f"[DONE] Snapshot built month={summary['month']} "

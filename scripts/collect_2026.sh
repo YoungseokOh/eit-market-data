@@ -37,8 +37,11 @@ DART_PROGRESS="$REPO_ROOT/data/backfill/dart_kospi200.json"
 DART_QUARTERS=8                     # enough to PIT-replay all of 2026
 DART_DELAY=6                        # >= 5s per dart-api-limits rule
 
-# Transient DART symptoms -> stop immediately, resume after midnight KST.
-DART_TRANSIENT='ConnectTimeout|ReadTimeout|RemoteDisconnected|Connection reset|Max retries exceeded|HTTP 000|returned empty|조회된 데이타가 없습니다'
+# HARD transient DART symptoms -> stop immediately, resume after midnight KST.
+# NOTE: a raw `013 조회된 데이타가 없습니다` is a normal "no data for that quarter"
+# response and must NOT trigger a block — only connection-level failures and the
+# explicit "fundamentals returned empty" gate do.
+DART_TRANSIENT='ConnectTimeout|ReadTimeout|RemoteDisconnected|Connection reset|Max retries exceeded|HTTP 000|fundamentals returned empty'
 
 # --- helpers ---------------------------------------------------------------
 set_state() {  # phase status detail

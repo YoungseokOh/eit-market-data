@@ -434,7 +434,10 @@ class DartProvider:
         cache_key = f"fundamental:{norm_ticker}:{as_of.strftime('%Y%m')}"
         cached = self._cache_get(cache_key)
         if cached is not None and isinstance(cached, FundamentalData) and cached.quarters:
-            return cached
+            # Point-in-time guard: drop any cached quarter reported after as_of.
+            valid = [q for q in cached.quarters if q.report_date <= as_of]
+            if valid:
+                return cached.model_copy(update={"quarters": valid}) if len(valid) != len(cached.quarters) else cached
 
         async with self._semaphore:
             try:
@@ -450,7 +453,8 @@ class DartProvider:
         if result.quarters:
             self._cache_set(cache_key, result, _FINSTATE_TTL)
         elif not result.quarters:
-            # API returned empty — try any stale entry for this ticker
+            # API returned empty — try any stale entry for this ticker, but never
+            # leak quarters reported after as_of.
             stale = self._cache_stale(f"fundamental:{norm_ticker}:")
             if (
                 self._allow_stale_fallback
@@ -458,8 +462,10 @@ class DartProvider:
                 and isinstance(stale, FundamentalData)
                 and stale.quarters
             ):
-                logger.warning("DART API returned empty; using stale fundamentals cache for %s", norm_ticker)
-                return stale
+                valid = [q for q in stale.quarters if q.report_date <= as_of]
+                if valid:
+                    logger.warning("DART API returned empty; using stale fundamentals cache for %s", norm_ticker)
+                    return stale.model_copy(update={"quarters": valid})
             if self._raise_on_error:
                 raise RuntimeError(f"DART fundamentals returned empty for {norm_ticker}")
         return result
@@ -468,7 +474,14 @@ class DartProvider:
         norm_ticker = _normalize_ticker(ticker)
         cache_key = f"filing:{norm_ticker}:{as_of.strftime('%Y%m')}"
         cached = self._cache_get(cache_key)
-        if cached is not None and isinstance(cached, FilingData) and cached.business_overview:
+        if (
+            cached is not None
+            and isinstance(cached, FilingData)
+            and cached.business_overview
+            and cached.filing_date is not None
+            and cached.filing_date <= as_of
+        ):
+            # Point-in-time guard: only trust a cached filing actually filed by as_of.
             return cached
 
         async with self._semaphore:
@@ -489,7 +502,10 @@ class DartProvider:
                 and stale is not None
                 and isinstance(stale, FilingData)
                 and stale.business_overview
+                and stale.filing_date is not None
+                and stale.filing_date <= as_of
             ):
+                # Point-in-time guard: never fall back to a filing filed after as_of.
                 logger.warning("DART API returned empty; using stale filing cache for %s", norm_ticker)
                 return stale
             if self._raise_on_error:

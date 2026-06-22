@@ -187,6 +187,16 @@ class CacheOnlyDartProvider:
             self._cache = None
 
     def _lookup(self, prefix: str, ticker: str, as_of: date) -> Any:
+        """Coarse bucket-month pre-filter.
+
+        Returns the record stored under the collection bucket whose month is
+        ``<= as_of``. This is only a pre-filter on the *collection* bucket; the
+        record's own real date (``filing_date`` / ``report_date``) must still be
+        validated against ``as_of`` by the caller before it is trusted, because
+        a bucket can legitimately hold a record whose real date is in the future
+        relative to ``as_of`` (e.g. an annual report physically filed months
+        after the collection month it was first seen in).
+        """
         if self._cache is None:
             return None
         target_ym = as_of.strftime("%Y%m")
@@ -205,6 +215,19 @@ class CacheOnlyDartProvider:
                 latest_key = text
         return self._cache.get(latest_key) if latest_key is not None else None
 
+    def _iter_cached(self, prefix: str, ticker: str) -> Any:
+        """Yield every cached record for ``prefix:ticker:*`` (any bucket month)."""
+        if self._cache is None:
+            return
+        key_prefix = f"{prefix}:{ticker}:"
+        for key in self._cache.iterkeys():
+            text = str(key)
+            if not text.startswith(key_prefix):
+                continue
+            value = self._cache.get(text)
+            if value is not None:
+                yield value
+
     async def fetch_fundamentals(
         self,
         ticker: str,
@@ -212,16 +235,35 @@ class CacheOnlyDartProvider:
         n_quarters: int = 8,
     ) -> FundamentalData:
         _ = n_quarters
-        cached = self._lookup("fundamental", normalize_ticker(ticker), as_of)
+        norm_ticker = normalize_ticker(ticker)
+        cached = self._lookup("fundamental", norm_ticker, as_of)
         if isinstance(cached, FundamentalData):
+            # Point-in-time guard: a cached bucket may carry quarters whose
+            # report_date is after as_of (future annual/interim reports). Drop
+            # them so the snapshot never leaks look-ahead information.
+            valid_quarters = [q for q in cached.quarters if q.report_date <= as_of]
+            if len(valid_quarters) != len(cached.quarters):
+                return cached.model_copy(update={"quarters": valid_quarters})
             return cached
-        return FundamentalData(ticker=normalize_ticker(ticker))
+        return FundamentalData(ticker=norm_ticker)
 
     async def fetch_filing(self, ticker: str, as_of: date) -> FilingData:
-        cached = self._lookup("filing", normalize_ticker(ticker), as_of)
-        if isinstance(cached, FilingData):
-            return cached
-        return FilingData(ticker=normalize_ticker(ticker))
+        norm_ticker = normalize_ticker(ticker)
+        # Point-in-time guard: never return a filing whose filing_date is unknown
+        # or after as_of. Scan all cached buckets and pick the most recent filing
+        # that was actually filed on or before as_of.
+        best: FilingData | None = None
+        for cached in self._iter_cached("filing", norm_ticker):
+            if not isinstance(cached, FilingData):
+                continue
+            filing_date = cached.filing_date
+            if filing_date is None or filing_date > as_of:
+                continue
+            if best is None or best.filing_date is None or filing_date > best.filing_date:
+                best = cached
+        if best is not None:
+            return best
+        return FilingData(ticker=norm_ticker)
 
     async def fetch_issued_shares(self, ticker: str, as_of: date) -> float | None:
         cached = self._lookup("issued_shares", normalize_ticker(ticker), as_of)
