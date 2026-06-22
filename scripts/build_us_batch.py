@@ -26,6 +26,14 @@ from io import StringIO
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
+# Guard against indefinite hangs on stuck yfinance/SEC sockets (no per-request
+# timeout in the providers): a stalled read raises after 90s instead of hanging
+# forever. Providers catch the exception and return empty, so one slow ticker is
+# skipped rather than freezing the whole batch.
+import socket as _socket
+
+_socket.setdefaulttimeout(90)
+
 from dotenv import load_dotenv
 
 load_dotenv(PROJECT_ROOT / ".env")
@@ -40,7 +48,13 @@ from eit_market_data.snapshot import (
     serialize_snapshot_metadata,
 )
 
-from eit_market_data.schemas.snapshot import MonthlySnapshot, SnapshotMetadata
+from eit_market_data.schemas.snapshot import (
+    FundamentalData,
+    MonthlySnapshot,
+    SectorAverages,
+    SnapshotMetadata,
+)
+from statistics import mean as _mean
 
 DEFAULT_SP500_CSV = PROJECT_ROOT / "universes" / "sp500.csv"
 NDX_100_URL = "https://en.wikipedia.org/wiki/Nasdaq-100"
@@ -285,6 +299,47 @@ def _write_snapshot_bundle(
     )
 
 
+def _sector_averages_from_funds(
+    sector: str, funds: Sequence[FundamentalData]
+) -> SectorAverages:
+    """Compute sector average metrics from already-fetched fundamentals.
+
+    Mirrors ``YFinanceProvider.fetch_sector_averages`` math but takes the
+    merged per-ticker fundamentals as input, so no new yfinance calls are made.
+    The post-chunk full-universe re-fetch was the step that hung indefinitely on
+    stalled Yahoo keepalive sockets (no timeout layer can interrupt it).
+    """
+    metrics: dict[str, list[float]] = {}
+
+    def _add(key: str, val: float | None) -> None:
+        if val is not None:
+            metrics.setdefault(key, []).append(val)
+
+    for fund in funds:
+        if not fund or not fund.quarters:
+            continue
+        q = fund.quarters[0]
+        rev = q.revenue
+        ta = q.total_assets
+        if not rev or not ta or ta == 0:
+            continue
+        _add("roa", (q.net_income or 0) / ta if ta else None)
+        _add("roe", (q.net_income or 0) / q.total_equity if q.total_equity else None)
+        _add("gross_margin", (q.gross_profit or 0) / rev)
+        _add("operating_margin", (q.operating_income or 0) / rev)
+        _add("net_margin", (q.net_income or 0) / rev)
+        if q.current_liabilities and q.current_liabilities > 0:
+            _add("current_ratio", (q.current_assets or 0) / q.current_liabilities)
+        if q.total_equity and q.total_equity > 0:
+            _add("debt_to_equity", (q.total_debt or 0) / q.total_equity)
+        _add("asset_turnover", rev / ta)
+        if fund.last_close_price and q.eps and q.eps > 0:
+            _add("pe_ttm", fund.last_close_price / (q.eps * 4))
+
+    avg = {k: round(float(_mean(vals)), 4) for k, vals in metrics.items() if vals}
+    return SectorAverages(sector=sector, avg_metrics=avg)
+
+
 async def _build_chunked_snapshot(
     month: str,
     universe: Sequence[str],
@@ -293,9 +348,12 @@ async def _build_chunked_snapshot(
     *,
     chunk_size: int,
     chunk_pause_seconds: float = 0.0,
+    decision_date: date | None = None,
 ) -> MonthlySnapshot:
     if chunk_size <= 0 or chunk_size >= len(universe):
-        return await builder.build(month=month, universe=list(universe), config=config)
+        return await builder.build(
+            month=month, universe=list(universe), config=config, decision_date=decision_date
+        )
 
     chunk_snaps: list[MonthlySnapshot] = []
     for idx, chunk in enumerate(_chunks(universe, chunk_size), start=1):
@@ -306,7 +364,9 @@ async def _build_chunked_snapshot(
             (len(universe) - 1) // chunk_size + 1,
             len(chunk),
         )
-        snapshot = await builder.build(month=month, universe=list(chunk), config=config)
+        snapshot = await builder.build(
+            month=month, universe=list(chunk), config=config, decision_date=decision_date
+        )
         chunk_snaps.append(snapshot)
         if chunk_pause_seconds > 0 and idx < (len(universe) - 1) // chunk_size + 1:
             logger.info("[%s] sleep %.1fs before next chunk", month, chunk_pause_seconds)
@@ -320,16 +380,16 @@ async def _build_chunked_snapshot(
     for ticker, sector in sector_map.items():
         sector_tickers[sector].append(ticker)
 
-    sector_avg_tasks = {
-        sector: builder.sector.fetch_sector_averages(
+    # Compute sector averages locally from the merged fundamentals already
+    # fetched per chunk, instead of re-fetching every ticker from yfinance. The
+    # re-fetch burst was hanging indefinitely on stalled Yahoo keepalive sockets.
+    sector_averages = {
+        sector: _sector_averages_from_funds(
             sector,
-            tickers,
-            merged.decision_date,
+            [merged.fundamentals[t] for t in tickers if t in merged.fundamentals],
         )
         for sector, tickers in sector_tickers.items()
     }
-    all_avgs = await asyncio.gather(*sector_avg_tasks.values())
-    sector_averages = dict(zip(sector_avg_tasks.keys(), all_avgs, strict=True))
 
     return MonthlySnapshot(
         decision_date=merged.decision_date,
@@ -417,6 +477,7 @@ async def build_month_range(
     as_of_only: bool,
     pause_seconds: float,
     fail_fast: bool,
+    decision_date: date | None = None,
 ) -> None:
     sp500 = _resolve_sp500_tickers(sp500_csv)
     ndx100 = _resolve_nasdaq100_tickers(ndx_source)
@@ -479,6 +540,9 @@ async def build_month_range(
             # poison cached ticker metadata across the whole backfill.
             providers = create_real_providers()
             builder = SnapshotBuilder(**providers)
+            # Only apply an explicit partial-month decision date to its own month;
+            # other months keep their default last-business-day decision date.
+            month_decision = decision_date if (decision_date and decision_date.strftime("%Y-%m") == month) else None
             snapshot = await _build_chunked_snapshot(
                 month=month,
                 universe=universe,
@@ -486,6 +550,7 @@ async def build_month_range(
                 config=config,
                 chunk_size=chunk_size,
                 chunk_pause_seconds=chunk_pause_seconds,
+                decision_date=month_decision,
             )
 
             metadata = SnapshotMetadata(
@@ -593,6 +658,12 @@ def main() -> None:
         help="Skip current/future months",
     )
     parser.add_argument(
+        "--decision-date",
+        default=None,
+        help="Explicit partial-month decision date YYYY-MM-DD (e.g. 2026-06-19). "
+        "Applied only to its own month; pins as_of instead of last business day.",
+    )
+    parser.add_argument(
         "--fail-fast",
         action="store_true",
         help="Stop on first month failure",
@@ -620,6 +691,8 @@ def main() -> None:
         start_month = args.start_month
         end_month = args.end_month
 
+    decision_date = date.fromisoformat(args.decision_date) if args.decision_date else None
+
     asyncio.run(
         build_month_range(
             start_month=start_month,
@@ -634,6 +707,7 @@ def main() -> None:
             as_of_only=args.as_of_only,
             pause_seconds=args.month_delay,
             fail_fast=args.fail_fast,
+            decision_date=decision_date,
         )
     )
 

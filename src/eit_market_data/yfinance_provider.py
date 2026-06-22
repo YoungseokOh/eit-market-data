@@ -31,6 +31,38 @@ from eit_market_data.schemas.snapshot import (
 
 logger = logging.getLogger(__name__)
 
+
+def _install_curl_timeout(default_timeout: float = 30.0) -> None:
+    """Force a hard per-request timeout into yfinance's curl_cffi backend.
+
+    yfinance (curl_cffi) hangs indefinitely when a Yahoo keepalive socket stalls
+    inside ``curl_easy_perform`` because some yfinance code paths pass
+    ``timeout=None`` (e.g. ``.info`` / financial statements), and the blocking
+    call runs in an uninterruptible thread that ``asyncio.wait_for`` cannot
+    cancel. ``setdefault`` is not enough because the key is already present, so
+    we *cap* every request: a ``None``/missing/oversized timeout is forced down
+    to ``default_timeout``; a smaller explicit yfinance timeout is kept.
+    """
+    try:
+        import curl_cffi.requests as _ccr
+    except Exception:  # noqa: BLE001 - optional dependency / API drift
+        return
+    if getattr(_ccr.Session.request, "_eit_timeout_patched", False):
+        return
+    _orig_request = _ccr.Session.request
+
+    def _request_with_timeout(self, *args, **kwargs):  # noqa: ANN001, ANN202
+        t = kwargs.get("timeout")
+        if t is None or not isinstance(t, (int, float)) or t > default_timeout:
+            kwargs["timeout"] = default_timeout
+        return _orig_request(self, *args, **kwargs)
+
+    _request_with_timeout._eit_timeout_patched = True  # type: ignore[attr-defined]
+    _ccr.Session.request = _request_with_timeout
+
+
+_install_curl_timeout()
+
 # ---------------------------------------------------------------------------
 # Column name mappings: yfinance → QuarterlyFinancials schema
 # ---------------------------------------------------------------------------
@@ -78,6 +110,10 @@ _CASHFLOW_MAP: dict[str, str] = {
 
 # Concurrency limiter for yfinance (avoid rate-limiting)
 _SEMAPHORE = asyncio.Semaphore(1)
+# Hard wall-clock budget for a single blocking yfinance call. yfinance (curl_cffi)
+# does not honour socket.setdefaulttimeout, so a stuck Yahoo socket can hang
+# indefinitely; this bounds every call at the async boundary instead.
+_YF_CALL_TIMEOUT = 90.0
 _YF_THROTTLE_LOCK = threading.Lock()
 _YF_LAST_REQUEST_AT = 0.0
 _YF_MIN_REQUEST_INTERVAL_SECONDS = 1.0
@@ -193,6 +229,24 @@ class YFinanceProvider:
             logger.warning("%s fetch failed for %s: %s", attr, symbol, last_error)
         return None
 
+    async def _run_limited(self, fn, *args, default):  # noqa: ANN001, ANN202
+        """Run a blocking yfinance call under the shared semaphore with a hard
+        wall-clock timeout. On timeout/error, log and return ``default()`` (a
+        fresh empty value) so one stuck Yahoo socket cannot freeze the batch."""
+        name = getattr(fn, "__name__", str(fn))
+        async with _SEMAPHORE:
+            try:
+                return await asyncio.wait_for(
+                    asyncio.to_thread(fn, *args), _YF_CALL_TIMEOUT
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "yfinance %s exceeded %.0fs timeout", name, _YF_CALL_TIMEOUT
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("yfinance %s failed: %s", name, exc)
+            return default()
+
     # ------------------------------------------------------------------
     # PriceProvider
     # ------------------------------------------------------------------
@@ -201,10 +255,9 @@ class YFinanceProvider:
         self, ticker: str, as_of: date, lookback_days: int = 300
     ) -> list[PriceBar]:
         """Fetch daily OHLCV from yfinance, filtered to <= as_of."""
-        async with _SEMAPHORE:
-            return await asyncio.to_thread(
-                self._fetch_prices_sync, ticker, as_of, lookback_days
-            )
+        return await self._run_limited(
+            self._fetch_prices_sync, ticker, as_of, lookback_days, default=list
+        )
 
     def _fetch_prices_sync(
         self, ticker: str, as_of: date, lookback_days: int
@@ -263,10 +316,15 @@ class YFinanceProvider:
         self, ticker: str, as_of: date, n_quarters: int = 8
     ) -> FundamentalData:
         """Fetch quarterly financials from yfinance."""
-        async with _SEMAPHORE:
-            return await asyncio.to_thread(
-                self._fetch_fundamentals_sync, ticker, as_of, n_quarters
-            )
+        return await self._run_limited(
+            self._fetch_fundamentals_sync,
+            ticker,
+            as_of,
+            n_quarters,
+            default=lambda: FundamentalData(
+                ticker=ticker, quarters=[], market_cap=None, last_close_price=None
+            ),
+        )
 
     def _fetch_fundamentals_sync(
         self, ticker: str, as_of: date, n_quarters: int
@@ -363,8 +421,9 @@ class YFinanceProvider:
         as yfinance sector mappings are not point-in-time specific.
         """
         _ = as_of
-        async with _SEMAPHORE:
-            return await asyncio.to_thread(self._fetch_sector_map_sync, universe)
+        return await self._run_limited(
+            self._fetch_sector_map_sync, universe, default=dict
+        )
 
     def _fetch_sector_map_sync(self, universe: list[str]) -> dict[str, str]:
         result: dict[str, str] = {}
@@ -431,10 +490,9 @@ class YFinanceProvider:
         self, ticker: str, as_of: date, lookback_days: int = 30
     ) -> list[NewsItem]:
         """Fetch news from yfinance."""
-        async with _SEMAPHORE:
-            return await asyncio.to_thread(
-                self._fetch_news_sync, ticker, as_of, lookback_days
-            )
+        return await self._run_limited(
+            self._fetch_news_sync, ticker, as_of, lookback_days, default=list
+        )
 
     def _fetch_news_sync(
         self, ticker: str, as_of: date, lookback_days: int
@@ -521,8 +579,20 @@ class YFinanceProvider:
         Use ``EdgarFilingProvider`` instead. This stub returns
         the company description from yfinance .info as a fallback.
         """
-        async with _SEMAPHORE:
-            return await asyncio.to_thread(self._fetch_filing_stub, ticker, as_of)
+        return await self._run_limited(
+            self._fetch_filing_stub,
+            ticker,
+            as_of,
+            default=lambda: FilingData(
+                ticker=ticker,
+                filing_date=as_of,
+                filing_type="info",
+                business_overview=None,
+                risks=None,
+                mda=None,
+                governance=None,
+            ),
+        )
 
     def _fetch_filing_stub(self, ticker: str, as_of: date) -> FilingData:
         info = self._get_info(ticker)
