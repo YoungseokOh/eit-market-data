@@ -396,10 +396,23 @@ class YFinanceProvider:
         quarters.sort(key=lambda q: q.report_date, reverse=True)
         quarters = quarters[:n_quarters]
 
-        # Market cap and last close price
-        info = self._get_info(ticker, refresh=not quarters)
-        market_cap = _safe_float(info.get("marketCap"))
-        last_close = _safe_float(info.get("previousClose"))
+        # Point-in-time market_cap / last_close.
+        #
+        # yfinance's .info["marketCap"]/["previousClose"] are *current* values, so
+        # using them in a historical snapshot injects look-ahead (the same class of
+        # bug found on the KR side). Reconstruct as-of decision_date instead:
+        #   last_close   = unadjusted close on/just before as_of
+        #   market_cap   = last_close x issued shares from the most recent PIT
+        #                  quarter (report_date <= as_of). Unadjusted close is used
+        #                  so market_cap is a true as-of value rather than a
+        #                  dividend/split-adjusted figure.
+        last_close = self._asof_close(ticker, as_of)
+        issued_shares = next((q.issued_shares for q in quarters if q.issued_shares), None)
+        market_cap = (
+            round(last_close * issued_shares, 2)
+            if (last_close is not None and issued_shares)
+            else None
+        )
 
         return FundamentalData(
             ticker=ticker,
@@ -407,6 +420,29 @@ class YFinanceProvider:
             market_cap=market_cap,
             last_close_price=last_close,
         )
+
+    def _asof_close(self, ticker: str, as_of: date) -> float | None:
+        """Unadjusted closing price on or just before ``as_of`` (point-in-time)."""
+        start = as_of - timedelta(days=10)
+        end = as_of + timedelta(days=1)  # yfinance end is exclusive
+        try:
+            t = self._get_ticker(ticker)
+            _respect_yf_rate_limit()
+            df = t.history(start=str(start), end=str(end), auto_adjust=False)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("as-of close fetch failed for %s: %s", ticker, exc)
+            return None
+        if df is None or df.empty:
+            return None
+        last: float | None = None
+        for idx, row in df.iterrows():
+            bar_date = idx.date() if hasattr(idx, "date") else idx
+            if bar_date > as_of:
+                continue
+            close = _safe_float(row.get("Close"))
+            if close is not None:
+                last = round(close, 2)
+        return last
 
     # ------------------------------------------------------------------
     # SectorProvider
