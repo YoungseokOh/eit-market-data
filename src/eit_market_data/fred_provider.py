@@ -66,17 +66,44 @@ def _get_fred_client():  # noqa: ANN202
     return Fred(api_key=api_key)
 
 
-def _latest_value(
-    fred, series_id: str, as_of: date, lookback_days: int = 90
-) -> float | None:
-    """Get the most recent observation on or before ``as_of``."""
+def _vintage_series(fred, series_id: str, start: date, as_of: date):  # noqa: ANN201
+    """Fetch a FRED series AS IT WAS KNOWN on ``as_of`` (ALFRED real-time).
+
+    Setting realtime_start = realtime_end = as_of returns only the values that had
+    actually been released by the decision date, eliminating both release-lag
+    look-ahead (an observation dated before as_of but not yet published) and later
+    revisions. Falls back to a plain observation pull if the vintage query fails
+    (e.g. series with no real-time history), so macro never silently disappears.
+    """
+    asof_str = as_of.isoformat()
     try:
-        start = as_of - timedelta(days=lookback_days)
         data = fred.get_series(
             series_id,
             observation_start=start,
             observation_end=as_of,
+            realtime_start=asof_str,
+            realtime_end=asof_str,
         )
+        if data is not None and not data.empty:
+            return data.dropna()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("ALFRED vintage fetch failed for %s, falling back: %s", series_id, e)
+    try:
+        data = fred.get_series(series_id, observation_start=start, observation_end=as_of)
+        if data is not None and not data.empty:
+            return data.dropna()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Failed to fetch FRED series %s: %s", series_id, e)
+    return None
+
+
+def _latest_value(
+    fred, series_id: str, as_of: date, lookback_days: int = 90
+) -> float | None:
+    """Get the most recent observation released on or before ``as_of`` (vintage-aware)."""
+    try:
+        start = as_of - timedelta(days=lookback_days)
+        data = _vintage_series(fred, series_id, start, as_of)
         if data is not None and not data.empty:
             # Drop NaN and get last valid
             data = data.dropna()
@@ -93,14 +120,9 @@ def _yoy_change(
     """Compute year-over-year % change for a monthly/quarterly index series."""
     try:
         start = as_of - timedelta(days=400)
-        data = fred.get_series(
-            series_id,
-            observation_start=start,
-            observation_end=as_of,
-        )
+        data = _vintage_series(fred, series_id, start, as_of)
         if data is None or data.empty:
             return None
-        data = data.dropna()
         if len(data) < 2:
             return None
 
@@ -125,14 +147,9 @@ def _mom_change(
     """Compute month-over-month % change."""
     try:
         start = as_of - timedelta(days=90)
-        data = fred.get_series(
-            series_id,
-            observation_start=start,
-            observation_end=as_of,
-        )
+        data = _vintage_series(fred, series_id, start, as_of)
         if data is None or data.empty:
             return None
-        data = data.dropna()
         if len(data) < 2:
             return None
         current = float(data.iloc[-1])
@@ -151,14 +168,9 @@ def _nonfarm_change(
     """Compute month-over-month change in nonfarm payrolls (thousands)."""
     try:
         start = as_of - timedelta(days=90)
-        data = fred.get_series(
-            "PAYEMS",
-            observation_start=start,
-            observation_end=as_of,
-        )
+        data = _vintage_series(fred, "PAYEMS", start, as_of)
         if data is None or data.empty:
             return None
-        data = data.dropna()
         if len(data) < 2:
             return None
         return round(float(data.iloc[-1] - data.iloc[-2]), 0)
