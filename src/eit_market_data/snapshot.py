@@ -34,20 +34,37 @@ def config_hash(config: SnapshotConfig) -> str:
     return hashlib.sha256(blob).hexdigest()[:16]
 
 
-def create_real_providers() -> dict:
+def create_real_providers(fundamentals_source: str = "yfinance") -> dict:
     """Create real data providers (yfinance + FRED + EDGAR).
 
     Returns dict of keyword arguments for SnapshotBuilder.
     Requires: ``pip install -e '.[real-data]'``
+
+    ``fundamentals_source`` selects the fundamental provider:
+
+    * ``"yfinance"`` (default) — yfinance quarterly statements. Rolling ~5
+      quarters only, so it cannot reach far into the past.
+    * ``"edgar_xbrl"`` — SEC EDGAR XBRL companyfacts. True point-in-time
+      (per-fact ``filed`` dates) with history back to ~2009; required for
+      historical backfills. Prices/sector/benchmark stay on yfinance.
     """
     from eit_market_data.edgar_provider import EdgarFilingProvider
     from eit_market_data.fred_provider import FredMacroProvider
     from eit_market_data.yfinance_provider import YFinanceProvider
 
     yf = YFinanceProvider()
+    if fundamentals_source == "edgar_xbrl":
+        from eit_market_data.edgar_xbrl_provider import EdgarXbrlFundamentalProvider
+
+        fundamental_provider: Any = EdgarXbrlFundamentalProvider(price_provider=yf)
+    elif fundamentals_source == "yfinance":
+        fundamental_provider = yf
+    else:
+        raise ValueError(f"unknown fundamentals_source: {fundamentals_source!r}")
+
     return {
         "price_provider": yf,
-        "fundamental_provider": yf,
+        "fundamental_provider": fundamental_provider,
         "filing_provider": EdgarFilingProvider(),
         "macro_provider": FredMacroProvider(),
         "sector_provider": yf,

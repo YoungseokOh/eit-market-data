@@ -16,7 +16,7 @@ import logging
 import sys
 import urllib.request
 from datetime import datetime
-from datetime import date
+from datetime import date, timedelta
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterable, Sequence
@@ -86,6 +86,16 @@ def _month_range(start: str, end: str) -> list[str]:
         else:
             m += 1
     return out
+
+
+def _month_end_weekday(year: int, month: int) -> date:
+    """Last weekday of the month (membership-lookup date; exact trading day not needed)."""
+    import calendar
+
+    d = date(year, month, calendar.monthrange(year, month)[1])
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d
 
 
 def _load_csv_tickers(path: Path) -> list[str]:
@@ -478,6 +488,8 @@ async def build_month_range(
     pause_seconds: float,
     fail_fast: bool,
     decision_date: date | None = None,
+    fundamentals_source: str = "yfinance",
+    universe_mode: str = "static",
 ) -> None:
     sp500 = _resolve_sp500_tickers(sp500_csv)
     ndx100 = _resolve_nasdaq100_tickers(ndx_source)
@@ -534,18 +546,30 @@ async def build_month_range(
             logger.info("[%s] (%d/%d) already exists, skip", month, i, month_count)
             continue
 
+        # Survivorship-free universe: reconstruct index membership as of each
+        # month instead of reusing today's list. Static mode keeps the legacy
+        # merged universe.
+        if universe_mode == "pit":
+            from eit_market_data.us_universe import pit_universe
+
+            y, m = int(month[:4]), int(month[5:7])
+            mem_asof = decision_date if (decision_date and decision_date.strftime("%Y-%m") == month) else _month_end_weekday(y, m)
+            month_universe = pit_universe(mem_asof)
+        else:
+            month_universe = universe
+
         try:
-            logger.info("[%s] START %d/%d (%d tickers)", month, i, month_count, len(universe))
+            logger.info("[%s] START %d/%d (%d tickers)", month, i, month_count, len(month_universe))
             # Recreate providers each month so transient Yahoo failures do not
             # poison cached ticker metadata across the whole backfill.
-            providers = create_real_providers()
+            providers = create_real_providers(fundamentals_source=fundamentals_source)
             builder = SnapshotBuilder(**providers)
             # Only apply an explicit partial-month decision date to its own month;
             # other months keep their default last-business-day decision date.
             month_decision = decision_date if (decision_date and decision_date.strftime("%Y-%m") == month) else None
             snapshot = await _build_chunked_snapshot(
                 month=month,
-                universe=universe,
+                universe=month_universe,
                 builder=builder,
                 config=config,
                 chunk_size=chunk_size,
@@ -664,6 +688,20 @@ def main() -> None:
         "Applied only to its own month; pins as_of instead of last business day.",
     )
     parser.add_argument(
+        "--fundamentals-source",
+        default="yfinance",
+        choices=["yfinance", "edgar_xbrl"],
+        help="Fundamental data source. edgar_xbrl gives true point-in-time history "
+        "back to ~2009 (required for historical backfills); yfinance is rolling ~5 quarters.",
+    )
+    parser.add_argument(
+        "--universe-mode",
+        default="static",
+        choices=["static", "pit"],
+        help="static = today's S&P500+NDX for all months; pit = survivorship-free "
+        "membership reconstructed as of each month (S&P500 via Wikipedia change log).",
+    )
+    parser.add_argument(
         "--fail-fast",
         action="store_true",
         help="Stop on first month failure",
@@ -708,6 +746,8 @@ def main() -> None:
             pause_seconds=args.month_delay,
             fail_fast=args.fail_fast,
             decision_date=decision_date,
+            fundamentals_source=args.fundamentals_source,
+            universe_mode=args.universe_mode,
         )
     )
 
