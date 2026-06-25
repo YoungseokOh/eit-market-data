@@ -13,13 +13,11 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from dotenv import load_dotenv
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SRC_ROOT = PROJECT_ROOT / "src"
-if str(SRC_ROOT) not in sys.path:
-    sys.path.insert(0, str(SRC_ROOT))
-load_dotenv(PROJECT_ROOT / ".env")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _common import bootstrap
+
+PROJECT_ROOT = bootstrap()
 
 from eit_market_data.kr.market_helpers import INDEX_CODE_NAMES, normalize_ticker
 from eit_market_data.kr.pykrx_loader import load_pykrx_stock
