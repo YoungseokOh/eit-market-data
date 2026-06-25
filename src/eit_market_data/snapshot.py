@@ -13,10 +13,15 @@ import json
 import logging
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Literal
 
+from eit_market_data.core.calendar import (
+    _last_business_day,
+    _next_business_day,
+)
+from eit_market_data.core.hashing import _content_hash
 from eit_market_data.synthetic import SyntheticProvider
 from eit_market_data.schemas.snapshot import MonthlySnapshot, SnapshotMetadata
 
@@ -145,46 +150,11 @@ def create_kr_providers(
     }
 
 
-def _last_business_day(year: int, month: int) -> date:
-    """Return the last business day of the given month."""
-    # Go to last day of month
-    if month == 12:
-        last = date(year + 1, 1, 1) - timedelta(days=1)
-    else:
-        last = date(year, month + 1, 1) - timedelta(days=1)
-    # Walk back to a weekday
-    while last.weekday() >= 5:
-        last -= timedelta(days=1)
-    return last
-
-
-def _first_business_day(year: int, month: int) -> date:
-    """Return the first business day of the given month."""
-    first = date(year, month, 1)
-    while first.weekday() >= 5:
-        first += timedelta(days=1)
-    return first
-
-
-def _next_business_day(value: date) -> date:
-    """Return the next weekday after the given date."""
-    next_day = value + timedelta(days=1)
-    while next_day.weekday() >= 5:
-        next_day += timedelta(days=1)
-    return next_day
-
-
 def _next_month(year: int, month: int) -> tuple[int, int]:
     """Return (year, month) for the next calendar month."""
     if month == 12:
         return year + 1, 1
     return year, month + 1
-
-
-def _content_hash(obj: object) -> str:
-    """SHA-256 of the JSON-serializable object."""
-    blob = json.dumps(obj, sort_keys=True, default=str).encode()
-    return hashlib.sha256(blob).hexdigest()[:16]
 
 
 def serialize_snapshot(snapshot: MonthlySnapshot) -> dict[str, object]:

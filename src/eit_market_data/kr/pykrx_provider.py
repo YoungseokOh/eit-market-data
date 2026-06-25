@@ -17,6 +17,8 @@ from eit_market_data.kr.market_helpers import (
     fetch_market_cap_frame,
     fetch_market_ticker_list,
 )
+from eit_market_data.core.price_frame import price_bars_from_frame
+from eit_market_data.core.sector_math import compute_sector_averages
 from eit_market_data.kr.krx_auth import KrxAuthRequired
 from eit_market_data.schemas.snapshot import (
     FundamentalData,
@@ -99,32 +101,7 @@ class PykrxProvider:
             as_of,
             logger_=logger,
         )
-        if df is None or df.empty:
-            return []
-
-        open_col = "시가" if "시가" in df.columns else "Open"
-        high_col = "고가" if "고가" in df.columns else "High"
-        low_col = "저가" if "저가" in df.columns else "Low"
-        close_col = "종가" if "종가" in df.columns else "Close"
-        volume_col = "거래량" if "거래량" in df.columns else "Volume"
-
-        bars: list[PriceBar] = []
-        for idx, row in df.iterrows():
-            bar_date = idx.date() if hasattr(idx, "date") else idx
-            if not isinstance(bar_date, date) or bar_date > as_of:
-                continue
-            bars.append(
-                PriceBar(
-                    date=bar_date,
-                    open=round(float(row.get(open_col, 0) or 0), 2),
-                    high=round(float(row.get(high_col, 0) or 0), 2),
-                    low=round(float(row.get(low_col, 0) or 0), 2),
-                    close=round(float(row.get(close_col, 0) or 0), 2),
-                    volume=float(row.get(volume_col, 0) or 0),
-                )
-            )
-
-        return bars[-lookback_days:]
+        return price_bars_from_frame(df, as_of, lookback_days)
 
     # ------------------------------------------------------------------
     # SectorProvider
@@ -205,8 +182,6 @@ class PykrxProvider:
         self, sector: str, tickers: list[str], as_of: date
     ) -> SectorAverages:
         """Compute sector average metrics from quarterly fundamentals."""
-        import numpy as np
-
         provider = self._fundamental_provider
         if provider is None and not self._fundamental_provider_init_failed:
             try:
@@ -228,43 +203,13 @@ class PykrxProvider:
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        metrics: dict[str, list[float]] = {}
-        for result in results:
-            if isinstance(result, Exception) or not isinstance(result, FundamentalData):
-                continue
-            if not result.quarters:
-                continue
-            q = result.quarters[0]
-            rev = q.revenue
-            ta = q.total_assets
-            if not rev or not ta or ta == 0:
-                continue
-
-            def _add(key: str, val: float | None) -> None:
-                if val is not None:
-                    metrics.setdefault(key, []).append(val)
-
-            _add("roa", (q.net_income or 0) / ta if ta else None)
-            _add(
-                "roe", (q.net_income or 0) / q.total_equity if q.total_equity else None
-            )
-            _add("gross_margin", (q.gross_profit or 0) / rev)
-            _add("operating_margin", (q.operating_income or 0) / rev)
-            _add("net_margin", (q.net_income or 0) / rev)
-            if q.current_liabilities and q.current_liabilities > 0:
-                _add("current_ratio", (q.current_assets or 0) / q.current_liabilities)
-            if q.total_equity and q.total_equity > 0:
-                _add("debt_to_equity", (q.total_debt or 0) / q.total_equity)
-            _add("asset_turnover", rev / ta)
-            if result.last_close_price and q.eps and q.eps > 0:
-                _add("pe_ttm", result.last_close_price / (q.eps * 4))
-
-        avg_metrics: dict[str, float] = {}
-        for key, values in metrics.items():
-            if values:
-                avg_metrics[key] = round(float(np.mean(values)), 4)
-
-        return SectorAverages(sector=sector, avg_metrics=avg_metrics)
+        funds = [
+            result
+            for result in results
+            if not isinstance(result, Exception)
+            and isinstance(result, FundamentalData)
+        ]
+        return compute_sector_averages(sector, funds)
 
     # ------------------------------------------------------------------
     # BenchmarkProvider
@@ -295,31 +240,7 @@ class PykrxProvider:
             logger_=logger,
             official_only=self._official_only,
         )
-        if df is None or df.empty:
-            return []
-
-        open_col = "시가" if "시가" in df.columns else "Open"
-        high_col = "고가" if "고가" in df.columns else "High"
-        low_col = "저가" if "저가" in df.columns else "Low"
-        close_col = "종가" if "종가" in df.columns else "Close"
-        volume_col = "거래량" if "거래량" in df.columns else "Volume"
-
-        bars: list[PriceBar] = []
-        for idx, row in df.iterrows():
-            bar_date = idx.date() if hasattr(idx, "date") else idx
-            if not isinstance(bar_date, date) or bar_date > as_of:
-                continue
-            bars.append(
-                PriceBar(
-                    date=bar_date,
-                    open=round(float(row.get(open_col, 0) or 0), 2),
-                    high=round(float(row.get(high_col, 0) or 0), 2),
-                    low=round(float(row.get(low_col, 0) or 0), 2),
-                    close=round(float(row.get(close_col, 0) or 0), 2),
-                    volume=float(row.get(volume_col, 0) or 0),
-                )
-            )
-        return bars[-lookback_days:]
+        return price_bars_from_frame(df, as_of, lookback_days)
 
     # ------------------------------------------------------------------
     # NewsProvider

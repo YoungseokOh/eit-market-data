@@ -10,6 +10,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+from eit_market_data.core.pit import is_visible
 from eit_market_data.kr.market_helpers import normalize_ticker
 from eit_market_data.schemas.snapshot import FilingData, FundamentalData, QuarterlyFinancials
 
@@ -478,8 +479,7 @@ class DartProvider:
             cached is not None
             and isinstance(cached, FilingData)
             and cached.business_overview
-            and cached.filing_date is not None
-            and cached.filing_date <= as_of
+            and is_visible(cached.filing_date, as_of)
         ):
             # Point-in-time guard: only trust a cached filing actually filed by as_of.
             return cached
@@ -502,8 +502,7 @@ class DartProvider:
                 and stale is not None
                 and isinstance(stale, FilingData)
                 and stale.business_overview
-                and stale.filing_date is not None
-                and stale.filing_date <= as_of
+                and is_visible(stale.filing_date, as_of)
             ):
                 # Point-in-time guard: never fall back to a filing filed after as_of.
                 logger.warning("DART API returned empty; using stale filing cache for %s", norm_ticker)
@@ -712,8 +711,6 @@ class DartProvider:
             if self._allow_stale_fallback and stale is not None:
                 logger.warning("DART API unavailable; using stale report list for %s: %s", corp_code, exc)
                 return stale
-            if self._raise_on_error:
-                raise
             raise
 
         if result is not None and not result.empty:
