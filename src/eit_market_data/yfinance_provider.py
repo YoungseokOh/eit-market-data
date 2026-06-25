@@ -19,6 +19,8 @@ from typing import Any
 
 import numpy as np
 
+from eit_market_data.core.price_frame import price_bars_from_frame
+from eit_market_data.core.sector_math import compute_sector_averages
 from eit_market_data.schemas.snapshot import (
     FilingData,
     FundamentalData,
@@ -289,24 +291,8 @@ class YFinanceProvider:
             logger.warning("No price data for %s", ticker)
             return []
 
-        bars: list[PriceBar] = []
-        for idx, row in df.iterrows():
-            bar_date = idx.date() if hasattr(idx, "date") else idx
-            if bar_date > as_of:
-                continue
-            bars.append(
-                PriceBar(
-                    date=bar_date,
-                    open=round(float(row["Open"]), 2),
-                    high=round(float(row["High"]), 2),
-                    low=round(float(row["Low"]), 2),
-                    close=round(float(row["Close"]), 2),
-                    volume=float(row.get("Volume", 0)),
-                )
-            )
-
         # Cap to lookback_days trading days
-        return bars[-lookback_days:]
+        return price_bars_from_frame(df, as_of, lookback_days)
 
     # ------------------------------------------------------------------
     # FundamentalProvider
@@ -481,42 +467,7 @@ class YFinanceProvider:
             *[self.fetch_fundamentals(t, as_of, n_quarters=4) for t in tickers]
         )
 
-        metrics: dict[str, list[float]] = {}
-        for fund in funds:
-            if not fund.quarters:
-                continue
-            q = fund.quarters[0]
-            rev = q.revenue
-            ta = q.total_assets
-            if not rev or not ta or ta == 0:
-                continue
-
-            def _add(key: str, val: float | None) -> None:
-                if val is not None:
-                    metrics.setdefault(key, []).append(val)
-
-            _add("roa", (q.net_income or 0) / ta if ta else None)
-            _add(
-                "roe",
-                (q.net_income or 0) / q.total_equity if q.total_equity else None,
-            )
-            _add("gross_margin", (q.gross_profit or 0) / rev)
-            _add("operating_margin", (q.operating_income or 0) / rev)
-            _add("net_margin", (q.net_income or 0) / rev)
-            if q.current_liabilities and q.current_liabilities > 0:
-                _add("current_ratio", (q.current_assets or 0) / q.current_liabilities)
-            if q.total_equity and q.total_equity > 0:
-                _add("debt_to_equity", (q.total_debt or 0) / q.total_equity)
-            _add("asset_turnover", rev / ta)
-            if fund.last_close_price and q.eps and q.eps > 0:
-                _add("pe_ttm", fund.last_close_price / (q.eps * 4))
-
-        avg: dict[str, float] = {}
-        for k, vals in metrics.items():
-            if vals:
-                avg[k] = round(float(np.mean(vals)), 4)
-
-        return SectorAverages(sector=sector, avg_metrics=avg)
+        return compute_sector_averages(sector, list(funds))
 
     # ------------------------------------------------------------------
     # NewsProvider
