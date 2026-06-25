@@ -10,13 +10,10 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SRC_ROOT = PROJECT_ROOT / "src"
-if str(SRC_ROOT) not in sys.path:
-    sys.path.insert(0, str(SRC_ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _common import bootstrap
 
-from dotenv import load_dotenv
-load_dotenv(PROJECT_ROOT / ".env")
+PROJECT_ROOT = bootstrap()
 
 UNIVERSE_CSV = PROJECT_ROOT / "universes/kr_universe.csv"
 ARTIFACTS_ROOT = PROJECT_ROOT / "artifacts"
