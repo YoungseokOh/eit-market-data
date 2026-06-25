@@ -40,11 +40,18 @@ _INFLATION_SERIES: dict[str, str] = {
 _GROWTH_SERIES: dict[str, str] = {
     "A191RL1Q225SBEA": "gdp_growth_yoy",   # Real GDP % change (quarterly, annualized)
     "UNRATE": "unemployment_rate",          # Unemployment Rate
-    "MANEMP": "ism_proxy",                  # Manufacturing Employment (ISM proxy)
+    "MANEMP": "manufacturing_employment",   # All Employees, Manufacturing (thousands)
     "UMCSENT": "consumer_confidence",       # U of Michigan Consumer Sentiment
     "PAYEMS": "nonfarm_payrolls",           # Total Nonfarm Payrolls (thousands)
-    # NAPM (ISM Manufacturing PMI) was discontinued; MANEMP used as proxy above
+    # NOTE: there is NO free ISM/PMI manufacturing series on FRED — the ISM PMI is
+    # licensed and NAPM was discontinued. MANEMP is manufacturing *employment*
+    # (~12,700 thousands), NOT a PMI diffusion index, so it is reported under its
+    # true name `manufacturing_employment` rather than being mislabeled as a PMI.
 }
+
+# Plausible value range for a PMI-style diffusion index (mostly 30-70 historically).
+# Used as a guard so a non-PMI series is never silently published as `ism_manufacturing`.
+_PMI_SANE_RANGE = (30.0, 70.0)
 
 _MARKET_SERIES: dict[str, str] = {
     "VIXCLS": "vix",                        # VIX Index
@@ -261,10 +268,19 @@ class FredMacroProvider:
         if nfp is not None:
             growth["nonfarm_payrolls_k"] = nfp
 
-        # ISM Manufacturing proxy via MANEMP (NAPM was discontinued on FRED)
-        ism = _latest_value(fred, "MANEMP", as_of)
-        if ism is not None:
-            growth["ism_manufacturing"] = ism
+        # Manufacturing employment (MANEMP). This is NOT a PMI: it is the level of
+        # manufacturing payroll employment in thousands (~12,700). It is reported
+        # under its true name. Previously it was mislabeled `ism_manufacturing`,
+        # which let a ~12,956 employment level masquerade as a ~45-55 PMI reading.
+        man_emp = _latest_value(fred, "MANEMP", as_of)
+        if man_emp is not None:
+            growth["manufacturing_employment"] = man_emp
+            # Range sanity: only publish under the PMI-like `ism_manufacturing`
+            # key when a value is actually in PMI territory. MANEMP never is, so
+            # this key stays absent until a genuine free PMI series is wired in.
+            lo, hi = _PMI_SANE_RANGE
+            if lo <= man_emp <= hi:
+                growth["ism_manufacturing"] = man_emp
 
         # --- Market Risk ---
         market: dict[str, object] = {}

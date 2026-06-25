@@ -499,6 +499,20 @@ class EdgarXbrlFundamentalProvider:
             else None
         )
 
+        # issued_shares coverage backfill. ~8% of issuers (ACN, F, CMCSA, BRK-B,
+        # ...) never populate the us-gaap CommonStockShares* tags that drive the
+        # per-quarter `issued_shares` field, so per-share metrics computed
+        # downstream would divide by None even though market_cap is populated via
+        # the same as-of share fallback. For any quarter still missing
+        # `issued_shares`, fill it from the as-of share count (cover-page / pooled
+        # fallback already used for market_cap). That count is point-in-time
+        # (filed<=as_of, end<=as_of) so this stays PIT-safe. market_cap is NOT
+        # recomputed here, so already-correct caps are untouched.
+        if shares:
+            for q in quarters:
+                if getattr(q, "issued_shares", None) is None:
+                    q.issued_shares = shares
+
         return FundamentalData(
             ticker=ticker,
             quarters=quarters,

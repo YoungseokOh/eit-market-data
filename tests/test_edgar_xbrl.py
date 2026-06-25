@@ -256,6 +256,69 @@ def test_asof_shares_prefers_outstanding_and_guards_staleness() -> None:
     assert prov._asof_shares({}, stale_only, as_of) is None
 
 
+def test_issued_shares_backfilled_from_asof_count(monkeypatch) -> None:
+    """When no us-gaap issued-shares tag exists, issued_shares is filled from the
+    as-of share count used for market_cap (and market_cap is unchanged)."""
+    facts = {
+        "facts": {
+            "us-gaap": {
+                "Revenues": {"units": {"USD": [_flow("2024-01-01", "2024-03-31", 1000, "2024-05-01")]}},
+                "NetIncomeLoss": {"units": {"USD": [_flow("2024-01-01", "2024-03-31", 200, "2024-05-01")]}},
+                # No CommonStockSharesOutstanding/Issued tag -> per-quarter
+                # issued_shares would be None. Shares come only from the
+                # weighted-average fallback (mimics ACN/F/CMCSA/BRK-B).
+                "WeightedAverageNumberOfDilutedSharesOutstanding": {
+                    "units": {"shares": [_inst("2024-03-31", 640, "2024-05-01")]}
+                },
+            }
+        }
+    }
+    monkeypatch.setenv("SEC_EDGAR_USER_AGENT", "Test test@example.com")
+
+    async def _fake_cik(client, ticker):  # noqa: ANN001, ANN202
+        return "0000000001"
+
+    monkeypatch.setattr(xbrl, "_ticker_to_cik", _fake_cik)
+    prov = _provider_with_facts(facts, close=10.0, split=1.0)
+    fd = asyncio.run(prov.fetch_fundamentals("TEST", date(2024, 6, 30), n_quarters=8))
+
+    assert len(fd.quarters) == 1
+    # issued_shares backfilled from the as-of share count (640).
+    assert fd.quarters[0].issued_shares == 640
+    # market_cap = close x as-of shares = 10 * 640, unchanged by the backfill.
+    assert fd.market_cap == 10.0 * 640
+
+
+def test_issued_shares_not_overwritten_when_tag_present(monkeypatch) -> None:
+    """A real CommonStockSharesOutstanding value is NOT replaced by the fallback."""
+    facts = {
+        "facts": {
+            "us-gaap": {
+                "Revenues": {"units": {"USD": [_flow("2024-01-01", "2024-03-31", 1000, "2024-05-01")]}},
+                "NetIncomeLoss": {"units": {"USD": [_flow("2024-01-01", "2024-03-31", 200, "2024-05-01")]}},
+                "CommonStockSharesOutstanding": {
+                    "units": {"shares": [_inst("2024-03-31", 500, "2024-05-01")]}
+                },
+            },
+            "dei": {
+                "EntityCommonStockSharesOutstanding": {
+                    "units": {"shares": [_inst("2024-04-15", 510, "2024-05-01")]}
+                }
+            },
+        }
+    }
+    monkeypatch.setenv("SEC_EDGAR_USER_AGENT", "Test test@example.com")
+
+    async def _fake_cik(client, ticker):  # noqa: ANN001, ANN202
+        return "0000000001"
+
+    monkeypatch.setattr(xbrl, "_ticker_to_cik", _fake_cik)
+    prov = _provider_with_facts(facts, close=10.0, split=1.0)
+    fd = asyncio.run(prov.fetch_fundamentals("TEST", date(2024, 6, 30), n_quarters=8))
+    # Per-quarter issued_shares keeps its reported value (500), not the dei 510.
+    assert fd.quarters[0].issued_shares == 500
+
+
 def test_market_cap_applies_split_factor(monkeypatch) -> None:
     facts = {
         "facts": {
