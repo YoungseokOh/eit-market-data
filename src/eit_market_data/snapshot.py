@@ -211,6 +211,7 @@ class SnapshotBuilder:
         universe: list[str],
         config: SnapshotConfig | None = None,
         decision_date: date | None = None,
+        market: str = "XNYS",
     ) -> MonthlySnapshot:
         """Build a complete point-in-time snapshot for a given month.
 
@@ -219,7 +220,11 @@ class SnapshotBuilder:
             universe: List of tickers in the investment universe.
             config: Full configuration.
             decision_date: Optional explicit decision date for partial-month
-                local runs. Defaults to the month's last business day.
+                local runs. Defaults to the month's last *trading* day.
+            market: Exchange MIC for the trading calendar used to pick
+                decision/execution dates. Defaults to ``"XNYS"`` (US). KR
+                callers should pass ``"XKRX"`` so execution_date skips KRX
+                holidays.
 
         Returns:
             Frozen MonthlySnapshot.
@@ -227,12 +232,12 @@ class SnapshotBuilder:
         config = config or SnapshotConfig()
         year, mon = int(month[:4]), int(month[5:7])
         if decision_date is None:
-            decision_date = _last_business_day(year, mon)
+            decision_date = _last_business_day(year, mon, market)
         elif decision_date.strftime("%Y-%m") != month:
             raise ValueError(
                 f"decision_date {decision_date.isoformat()} is outside snapshot month {month}"
             )
-        execution_date = _next_business_day(decision_date)
+        execution_date = _next_business_day(decision_date, market)
 
         # Throttle concurrent API calls to avoid rate limits
         sem = asyncio.Semaphore(32)
@@ -336,9 +341,12 @@ class SnapshotBuilder:
         universe: list[str],
         config: SnapshotConfig | None = None,
         decision_date: date | None = None,
+        market: str = "XNYS",
     ) -> MonthlySnapshot:
         """Build snapshot and save metadata to artifacts."""
-        snapshot = await self.build(month, universe, config, decision_date=decision_date)
+        snapshot = await self.build(
+            month, universe, config, decision_date=decision_date, market=market
+        )
 
         artifacts_root = config.artifacts_dir if config is not None else "artifacts"
         artifacts_dir = Path(artifacts_root) / "snapshots" / month
