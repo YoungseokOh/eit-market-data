@@ -16,17 +16,15 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import logging
 import sys
 from datetime import date
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _common import bootstrap, write_json
 
-from dotenv import load_dotenv
-load_dotenv(PROJECT_ROOT / ".env")
+PROJECT_ROOT = bootstrap()
 
 from eit_market_data.snapshot import (
     SnapshotBuilder,
@@ -99,10 +97,7 @@ async def build_us_snapshot(
         # Save snapshot.json
         snapshot_path = month_dir / "snapshot.json"
         snapshot_json = serialize_snapshot(snapshot)
-        snapshot_path.write_text(
-            json.dumps(snapshot_json, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
+        write_json(snapshot_path, snapshot_json)
         logger.info(f"Saved snapshot.json: {snapshot_path}")
 
         # Save metadata.json
@@ -116,10 +111,7 @@ async def build_us_snapshot(
             "providers": ["YFinanceProvider", "FredMacroProvider", "EdgarFilingProvider"],
             "snapshot_metadata": serialize_snapshot_metadata(snapshot.metadata),
         }
-        metadata_path.write_text(
-            json.dumps(metadata_json, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
+        write_json(metadata_path, metadata_json)
         logger.info(f"Saved metadata.json: {metadata_path}")
 
         # Save manifest.json (for eit-research)
@@ -132,10 +124,7 @@ async def build_us_snapshot(
             "summary": "summary.json",
             "created_at": snapshot.metadata.created_at,
         }
-        manifest_path.write_text(
-            json.dumps(manifest, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
+        write_json(manifest_path, manifest)
         logger.info(f"Saved manifest.json: {manifest_path}")
 
         # Save summary.json
@@ -162,10 +151,7 @@ async def build_us_snapshot(
                 "summary": _display_path(summary_path),
             },
         }
-        summary_path.write_text(
-            json.dumps(summary, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
+        write_json(summary_path, summary)
         logger.info(f"Saved summary.json: {summary_path}")
 
         logger.info(f"✅ US snapshot built successfully: {month_str}")

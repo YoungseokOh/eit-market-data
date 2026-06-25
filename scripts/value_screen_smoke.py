@@ -26,6 +26,9 @@ import json
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _common import next_month as _next_month
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ROOT = PROJECT_ROOT / "artifacts" / "us" / "snapshots"
 
@@ -65,11 +68,6 @@ def screen_month(path: Path) -> dict:
         "top15": [t for t, _ in top15],
         "top15_count": len(top15),
     }
-
-
-def _next_month(month: str) -> str:
-    y, m = int(month[:4]), int(month[5:7])
-    return f"{y + 1:04d}-01" if m == 12 else f"{y:04d}-{m + 1:02d}"
 
 
 def main() -> int:

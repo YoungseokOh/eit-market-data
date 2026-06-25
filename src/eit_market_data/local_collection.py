@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import csv
 import gzip
-import hashlib
 import json
 import logging
 import re
@@ -20,6 +19,9 @@ from io import StringIO
 from pathlib import Path
 from typing import Any
 
+from eit_market_data.core.hashing import _content_hash
+from eit_market_data.core.pit import is_visible
+from eit_market_data.core.sector_math import compute_sector_averages
 from eit_market_data.kr.ci_safe_provider import NullMacroProvider
 from eit_market_data.kr.dart_provider import (
     DartProvider,
@@ -257,7 +259,7 @@ class CacheOnlyDartProvider:
             if not isinstance(cached, FilingData):
                 continue
             filing_date = cached.filing_date
-            if filing_date is None or filing_date > as_of:
+            if not is_visible(filing_date, as_of):
                 continue
             if best is None or best.filing_date is None or filing_date > best.filing_date:
                 best = cached
@@ -288,10 +290,6 @@ def _now_utc() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _date_token(value: date) -> str:
-    return value.isoformat()
-
-
 def _write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -302,21 +300,6 @@ def _write_json(path: Path, payload: Any) -> None:
 
 def _read_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
-
-
-def _hash_blob(obj: object) -> str:
-    blob = json.dumps(obj, sort_keys=True, default=str).encode()
-    return hashlib.sha256(blob).hexdigest()[:16]
-
-
-def _month_start(value: date) -> date:
-    return date(value.year, value.month, 1)
-
-
-def _next_month(value: date) -> date:
-    if value.month == 12:
-        return date(value.year + 1, 1, 1)
-    return date(value.year, value.month + 1, 1)
 
 
 def _news_window_start(as_of: date, lookback_days: int = NEWS_LOOKBACK_DAYS) -> date:
@@ -743,50 +726,16 @@ def compute_sector_averages_from_state(
     sector_map: dict[str, str],
     fundamentals: dict[str, FundamentalData],
 ) -> dict[str, SectorAverages]:
-    import numpy as np
-
     grouped: dict[str, list[FundamentalData]] = {}
     for ticker, sector in sector_map.items():
         grouped.setdefault(sector or "General", []).append(
             fundamentals.get(ticker, FundamentalData(ticker=ticker))
         )
 
-    result: dict[str, SectorAverages] = {}
-    for sector, funds in grouped.items():
-        metrics: dict[str, list[float]] = {}
-        for fund in funds:
-            if not fund.quarters:
-                continue
-            q = fund.quarters[0]
-            revenue = q.revenue
-            total_assets = q.total_assets
-            if not revenue or not total_assets or total_assets == 0:
-                continue
-
-            def _add(key: str, value: float | None) -> None:
-                if value is not None:
-                    metrics.setdefault(key, []).append(value)
-
-            _add("roa", (q.net_income or 0) / total_assets if total_assets else None)
-            _add("roe", (q.net_income or 0) / q.total_equity if q.total_equity else None)
-            _add("gross_margin", (q.gross_profit or 0) / revenue)
-            _add("operating_margin", (q.operating_income or 0) / revenue)
-            _add("net_margin", (q.net_income or 0) / revenue)
-            if q.current_liabilities and q.current_liabilities > 0:
-                _add("current_ratio", (q.current_assets or 0) / q.current_liabilities)
-            if q.total_equity and q.total_equity > 0:
-                _add("debt_to_equity", (q.total_debt or 0) / q.total_equity)
-            _add("asset_turnover", revenue / total_assets)
-            if fund.last_close_price and q.eps and q.eps > 0:
-                _add("pe_ttm", fund.last_close_price / (q.eps * 4))
-
-        avg_metrics = {
-            key: round(float(np.mean(values)), 4)
-            for key, values in metrics.items()
-            if values
-        }
-        result[sector] = SectorAverages(sector=sector, avg_metrics=avg_metrics)
-    return result
+    return {
+        sector: compute_sector_averages(sector, funds)
+        for sector, funds in grouped.items()
+    }
 
 
 def _serialize_batch(payload: BatchPayload) -> dict[str, Any]:
@@ -1273,15 +1222,15 @@ class LocalKrCollector:
         metadata = SnapshotMetadata(
             created_at=datetime.utcnow().isoformat(),
             config_hash=config_hash(SnapshotConfig(artifacts_dir=str(self.bundle_root))),
-            price_hash=_hash_blob({ticker: len(items) for ticker, items in state.prices.items()}),
-            fundamental_hash=_hash_blob(
+            price_hash=_content_hash({ticker: len(items) for ticker, items in state.prices.items()}),
+            fundamental_hash=_content_hash(
                 {ticker: len(item.quarters) for ticker, item in state.fundamentals.items()}
             ),
-            filing_hash=_hash_blob(
+            filing_hash=_content_hash(
                 {ticker: bool(item.business_overview) for ticker, item in state.filings.items()}
             ),
             news_hash="",
-            macro_hash=_hash_blob(macro.model_dump(mode="json")),
+            macro_hash=_content_hash(macro.model_dump(mode="json")),
         )
 
         return MonthlySnapshot(
@@ -1295,7 +1244,7 @@ class LocalKrCollector:
             sector_map=sector_map,
             sector_averages=sector_averages,
             benchmark_prices=benchmark_prices,
-            input_hash=_hash_blob({"decision_date": self.as_of.isoformat(), "universe": tickers}),
+            input_hash=_content_hash({"decision_date": self.as_of.isoformat(), "universe": tickers}),
             metadata=metadata,
         )
 

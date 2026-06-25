@@ -454,7 +454,6 @@ def fetch_live_sector_classification_map(
 ) -> tuple[dict[str, str], date | None]:
     """Build a live sector map from pykrx sector classifications, then FDR fallback."""
     active_logger = logger_ or logger
-    _ = lookback_days
 
     try:
         from eit_market_data.kr.pykrx_loader import load_pykrx_stock

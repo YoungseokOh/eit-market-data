@@ -12,6 +12,9 @@ from eit_market_data.edgar_xbrl_provider import (
 )
 from datetime import date as _date
 
+from helpers import flow_fact as _flow
+from helpers import instant_fact as _inst
+
 
 def test_standalone_flows_decomposes_ytd_and_q4() -> None:
     """3M direct; Q2=6M-3M; Q3=9M-6M; Q4=annual-9M (same fiscal-year start)."""
@@ -62,14 +65,6 @@ def test_standalone_flows_label_from_original_not_comparative() -> None:
     assert out["2024-03-31"]["val"] == 101
     assert out["2024-03-31"]["fy"] == 2024
     assert out["2024-03-31"]["fp"] == "Q1"
-
-
-def _flow(start: str, end: str, val: float, filed: str) -> dict:
-    return {"start": start, "end": end, "val": val, "filed": filed, "form": "10-Q"}
-
-
-def _inst(end: str, val: float, filed: str) -> dict:
-    return {"end": end, "val": val, "filed": filed, "form": "10-Q"}
 
 
 def test_pick_pit_filed_filter_and_latest_restatement() -> None:

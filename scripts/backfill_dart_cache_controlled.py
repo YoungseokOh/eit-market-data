@@ -13,14 +13,10 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from dotenv import load_dotenv
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _common import bootstrap
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SRC_ROOT = PROJECT_ROOT / "src"
-if str(SRC_ROOT) not in sys.path:
-    sys.path.insert(0, str(SRC_ROOT))
-
-load_dotenv(PROJECT_ROOT / ".env")
+PROJECT_ROOT = bootstrap()
 
 from eit_market_data.kr.dart_provider import DartProvider, _DART_CACHE_SIZE_LIMIT
 from eit_market_data.kr.market_helpers import normalize_ticker
@@ -105,33 +101,6 @@ def _should_stop_live(exc: Exception, *, filing_mode: str = "strict") -> bool:
         or "'status': '013'" in text
         or '"status": "013"' in text
     )
-
-
-async def _fetch_one(
-    provider: DartProvider,
-    ticker: str,
-    as_of: date,
-    quarters: int,
-    *,
-    need_fundamental: bool,
-    need_filing: bool,
-    delay_seconds: float,
-) -> dict[str, Any]:
-    result: dict[str, Any] = {"ticker": ticker}
-    if need_fundamental:
-        fundamental = await provider.fetch_fundamentals(ticker, as_of, n_quarters=quarters)
-        result["quarters"] = len(fundamental.quarters)
-        time.sleep(delay_seconds)
-    else:
-        result["quarters"] = "cached"
-
-    if need_filing:
-        filing = await provider.fetch_filing(ticker, as_of)
-        result["filing"] = bool(filing.business_overview)
-        time.sleep(delay_seconds)
-    else:
-        result["filing"] = "cached"
-    return result
 
 
 def _sleep_after_call(delay_seconds: float) -> None:

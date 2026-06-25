@@ -8,10 +8,10 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SRC_ROOT = PROJECT_ROOT / "src"
-if str(SRC_ROOT) not in sys.path:
-    sys.path.insert(0, str(SRC_ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _common import bootstrap
+
+PROJECT_ROOT = bootstrap(load_env=False)
 
 from eit_market_data.kr.krx_auth import (
     AuthStatus,

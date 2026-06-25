@@ -31,25 +31,23 @@ def test_get_info_does_not_cache_empty_response(monkeypatch) -> None:
     assert calls["count"] == 2
 
 
-def test_fetch_fundamentals_refreshes_info_when_quarters_empty(monkeypatch) -> None:
+def test_fetch_fundamentals_market_cap_none_when_no_quarters(monkeypatch) -> None:
+    # Point-in-time contract: with no quarterly statements there are no PIT
+    # issued shares, so market_cap must be None rather than the *current*
+    # info.marketCap (which would leak look-ahead). last_close_price is the
+    # as-of unadjusted close reconstructed from price history.
     provider = object.__new__(YFinanceProvider)
     provider._sector_cache = {}
     provider._info_cache = {"MSFT": {}}
 
     monkeypatch.setattr(provider, "_get_statement", lambda symbol, attr: None)
-    seen_refresh: list[bool] = []
-
-    def fake_get_info(symbol: str, *, refresh: bool = False):  # noqa: ANN001
-        seen_refresh.append(refresh)
-        return {"marketCap": 456.0, "previousClose": 78.0}
-
-    monkeypatch.setattr(provider, "_get_info", fake_get_info)
+    monkeypatch.setattr(provider, "_asof_close", lambda ticker, as_of: 78.0)
 
     fundamentals = provider._fetch_fundamentals_sync("MSFT", date(2025, 12, 31), 8)
 
-    assert fundamentals.market_cap == 456.0
+    assert fundamentals.quarters == []
+    assert fundamentals.market_cap is None
     assert fundamentals.last_close_price == 78.0
-    assert seen_refresh == [True]
 
 
 def test_fetch_prices_retries_after_rate_limit(monkeypatch) -> None:
