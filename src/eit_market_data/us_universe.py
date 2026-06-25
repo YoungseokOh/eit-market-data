@@ -166,16 +166,62 @@ def _dedup_by_cik(tickers: set[str]) -> list[str]:
     return sorted(keep)
 
 
-def pit_universe(as_of: date, *, include_ndx: bool = True, dedup: bool = True) -> list[str]:
+def _has_pit_listing(ticker: str, as_of: date, listed_asof: Any) -> bool:
+    """True if ``ticker`` had price history on/before ``as_of``.
+
+    ``listed_asof`` is a callable ``(ticker, as_of) -> bool`` (or truthy/None) the
+    caller injects — typically wrapping the price provider's as-of close lookup.
+    Any error is treated as "listing unknown" and the name is KEPT (we never drop
+    on a transient data hiccup). Only an explicit, successful "no data" drops it.
+    """
+    try:
+        result = listed_asof(ticker, as_of)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("listing check failed for %s, keeping: %s", ticker, exc)
+        return True
+    return bool(result)
+
+
+def pit_universe(
+    as_of: date,
+    *,
+    include_ndx: bool = True,
+    dedup: bool = True,
+    drop_unlisted: Any = None,
+) -> list[str]:
     """Survivorship-aware US universe as of ``as_of``.
 
-    S&P 500 is reconstructed point-in-time; Nasdaq-100 current list is unioned in
-    as a documented approximation. Same-CIK share-class duplicates are collapsed
-    so a company is not double-counted. Returns sorted tickers.
+    S&P 500 is reconstructed point-in-time. The Nasdaq-100 *current* list is
+    unioned in as a documented approximation — NDX historical membership isn't
+    cleanly tabulated. That union injects **phantom** names into early months:
+    issuers added to NDX only later (ARM, GEHC, ...) that had not yet listed as of
+    an early-2023 decision date. They carry no price/fundamentals so they're inert
+    in the value screen, but they inflate the raw universe count.
+
+    ``drop_unlisted`` removes those phantoms point-in-time. Pass a callable
+    ``(ticker, as_of) -> bool`` (truthy = the ticker had price history on/before
+    ``as_of``); any NDX-only name (i.e. not an S&P 500 PIT member) that the
+    callable reports as having no as-of listing is dropped. S&P 500 PIT members
+    are never dropped (their membership is already point-in-time). When
+    ``drop_unlisted`` is None the NDX union is kept verbatim (prior behavior).
+
+    Same-CIK share-class duplicates are collapsed so a company is not
+    double-counted. Returns sorted tickers.
+
+    RESIDUAL: with ``drop_unlisted=None`` the early-month NDX phantom names remain
+    (inert but counted). Even with the hook, a name that *had* listed before ``as_of``
+    but joined NDX only later is still unioned in — full NDX point-in-time
+    membership would require a tabulated NDX change log, which isn't available here.
     """
-    members = pit_sp500(as_of)
+    sp500 = pit_sp500(as_of)
+    members = set(sp500)
     if include_ndx:
-        members |= _load_ndx_current()
+        ndx_only = _load_ndx_current() - sp500
+        if drop_unlisted is not None:
+            ndx_only = {
+                t for t in ndx_only if _has_pit_listing(t, as_of, drop_unlisted)
+            }
+        members |= ndx_only
     if dedup:
         return _dedup_by_cik(members)
     return sorted(members)
