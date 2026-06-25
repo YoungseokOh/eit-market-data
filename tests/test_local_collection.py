@@ -6,6 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
+from helpers import FakeCache
 
 from eit_market_data.kr.news_catalog import KrNewsWindowCoverage
 from eit_market_data.kr.naver_news_provider import NaverArchiveNewsRecord
@@ -161,7 +162,26 @@ def test_local_kr_collector_skips_inter_ticker_delay_in_cache_only(tmp_path: Pat
     assert collector.inter_ticker_delay_seconds == 0.0
 
 
-def test_local_kr_collector_keeps_inter_ticker_delay_for_live_dart(tmp_path: Path) -> None:
+def test_local_kr_collector_keeps_inter_ticker_delay_for_live_dart(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    # Live DART mode eagerly constructs DartProvider, which validates the API
+    # key over the network. Stub it (and the ECOS macro provider) so the
+    # collector builds offline; the assertion below only inspects the
+    # configured inter-ticker delay.
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(local_collection, "DartProvider", lambda **kwargs: object())
+    monkeypatch.setattr(
+        local_collection, "PykrxProvider", lambda **kwargs: SimpleNamespace()
+    )
+    monkeypatch.setattr(
+        local_collection,
+        "CompositeKrFundamentalProvider",
+        lambda **kwargs: object(),
+    )
+    monkeypatch.setattr(local_collection, "EcosMacroProvider", lambda: object())
     collector = local_collection.LocalKrCollector(
         as_of=date(2026, 5, 4),
         storage_root=tmp_path,
@@ -540,24 +560,11 @@ def test_build_local_universe_manifest_kospi200_falls_back_to_naver_current(
     assert frame["source"].unique().tolist() == ["naver_current_fallback"]
 
 
-class _FakeCache:
-    """Minimal diskcache stand-in exposing get() and iterkeys()."""
-
-    def __init__(self, data: dict[str, object]) -> None:
-        self._data = dict(data)
-
-    def get(self, key: str) -> object:
-        return self._data.get(key)
-
-    def iterkeys(self):  # noqa: ANN201 - mirrors diskcache.Cache API
-        return iter(self._data.keys())
-
-
 def _cache_only_provider(data: dict[str, object]) -> local_collection.CacheOnlyDartProvider:
     provider = local_collection.CacheOnlyDartProvider.__new__(
         local_collection.CacheOnlyDartProvider
     )
-    provider._cache = _FakeCache(data)
+    provider._cache = FakeCache(data)
     return provider
 
 

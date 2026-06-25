@@ -141,15 +141,28 @@ eit-market-data/
 │   ├── synthetic.py              # SyntheticProvider (API 키 불필요, 테스트용 기본값)
 │   ├── cache.py                  # ResponseCache (diskcache 기반)
 │   ├── yfinance_provider.py      # US 가격/펀더멘털/뉴스/섹터/벤치마크
-│   ├── fred_provider.py          # US 매크로 (FRED API)
+│   ├── fred_provider.py          # US 매크로 (FRED API, ALFRED vintage PIT)
 │   ├── edgar_provider.py         # US 공시 (SEC EDGAR)
+│   ├── edgar_xbrl_provider.py    # US 펀더멘털 (SEC XBRL companyfacts, PIT 분기 분해)
+│   ├── us_universe.py            # US 유니버스 해석 (S&P500/NASDAQ100 PIT)
+│   ├── local_collection.py       # 로컬 수집 오케스트레이션 (LocalKrCollector 등)
+│   ├── io/                       # 스냅샷 번들 → 온디스크 아티팩트 I/O
+│   │   ├── __init__.py
+│   │   └── daily_prices.py       # 일별 OHLCV price store 빌더 (CSV consumer contract)
 │   └── schemas/
 │       ├── __init__.py
 │       └── snapshot.py           # Pydantic 스키마 (MonthlySnapshot 등)
 │
 ├── src/eit_market_data/kr/       # 한국 시장 프로바이더
 │   ├── pykrx_provider.py         # 가격/섹터/벤치마크 (pykrx)
+│   ├── pykrx_loader.py           # pykrx stock 모듈 lazy 로더
 │   ├── dart_provider.py          # 재무제표/공시 (opendartreader, DART_API_KEY)
+│   ├── fundamental_provider.py   # CompositeKrFundamentalProvider (DART+pykrx 합성)
+│   ├── ci_safe_provider.py       # ci_safe 프로파일 프로바이더 (API 키 불필요)
+│   ├── market_helpers.py         # 시가총액/거래일 등 KRX 시장 헬퍼
+│   ├── news_catalog.py           # KR 뉴스 윈도우 커버리지 카탈로그
+│   ├── naver_news_provider.py    # 네이버 금융 뉴스 (PIT 아카이브)
+│   ├── krx_auth.py               # KRX 인증/세션 복구
 │   └── ecos_provider.py          # 매크로 (한국은행 ECOS API, ECOS_API_KEY)
 │
 ├── scripts/                      # 데이터 수집 실행 스크립트

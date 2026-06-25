@@ -1,20 +1,11 @@
 from __future__ import annotations
 
-import importlib.util
 import json
-import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
-
-def _load_module(path: Path, module_name: str):
-    spec = importlib.util.spec_from_file_location(module_name, path)
-    module = importlib.util.module_from_spec(spec)
-    assert spec is not None and spec.loader is not None
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module
+from helpers import load_script_module as _load_module
 
 
 def test_build_kr_snapshot_skips_when_not_month_end(tmp_path: Path) -> None:
@@ -132,7 +123,11 @@ def test_run_daily_batch_uses_pykrx_crawler(monkeypatch, tmp_path: Path) -> None
     monkeypatch.setattr(module, "run_step", fake_run_step)
     monkeypatch.setattr(module, "build_run_root", lambda base_dir, as_of: base_dir / "run-1")
     monkeypatch.setattr(module, "assess_crawl_outputs", lambda data_dir: [])
-    monkeypatch.setattr(module, "inspect_snapshot_step", lambda artifacts_dir, as_of: ("ok", ""))
+    monkeypatch.setattr(
+        module,
+        "inspect_snapshot_step",
+        lambda artifacts_dir, as_of, market_subdir: ("ok", ""),
+    )
 
     exit_code, summary = module.run_daily_batch(
         as_of=date(2026, 3, 31),
@@ -197,6 +192,7 @@ def test_build_kr_snapshot_manifest_ignores_news_coverage() -> None:
         "official",
         {
             "market_cap": 1,
+            "issued_shares": 1,
             "benchmark_bars": 1,
         },
     )

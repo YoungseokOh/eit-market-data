@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import importlib.util
 import json
 import logging
 import sys
@@ -9,6 +8,8 @@ from datetime import date
 from pathlib import Path
 
 import pandas as pd
+from helpers import load_script_module as _load_module
+
 from eit_market_data.schemas.snapshot import (
     FilingData,
     FundamentalData,
@@ -18,15 +19,6 @@ from eit_market_data.schemas.snapshot import (
     PriceBar,
     SnapshotMetadata,
 )
-
-
-def _load_module(path: Path, module_name: str):
-    spec = importlib.util.spec_from_file_location(module_name, path)
-    module = importlib.util.module_from_spec(spec)
-    assert spec is not None and spec.loader is not None
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 def test_fetch_pykrx_all_index_data_uses_shared_fallback(monkeypatch, tmp_path: Path) -> None:
@@ -307,8 +299,8 @@ def test_build_us_batch_recreates_providers_each_month(tmp_path: Path, monkeypat
         def __init__(self, **kwargs):  # noqa: ANN003
             _ = kwargs
 
-        async def build(self, month: str, universe: list[str], config):  # noqa: ANN001
-            _ = config
+        async def build(self, month: str, universe: list[str], config, decision_date=None):  # noqa: ANN001
+            _ = (config, decision_date)
             month_num = int(month[-2:])
             trade_day = date(2025, month_num, 28)
             return MonthlySnapshot(
@@ -347,7 +339,8 @@ def test_build_us_batch_recreates_providers_each_month(tmp_path: Path, monkeypat
                 metadata=SnapshotMetadata(),
             )
 
-    def fake_create_real_providers():
+    def fake_create_real_providers(fundamentals_source="yfinance"):  # noqa: ANN001
+        _ = fundamentals_source
         created.append(len(created) + 1)
         return {
             "price_provider": object(),
@@ -366,8 +359,9 @@ def test_build_us_batch_recreates_providers_each_month(tmp_path: Path, monkeypat
         *,
         chunk_size,
         chunk_pause_seconds,
+        decision_date=None,
     ):  # noqa: ANN001
-        _ = (chunk_size, chunk_pause_seconds)
+        _ = (chunk_size, chunk_pause_seconds, decision_date)
         return await builder.build(month, list(universe), config)
 
     monkeypatch.setattr(module, "_resolve_sp500_tickers", lambda path: ["AAPL"])
@@ -404,8 +398,8 @@ def test_build_us_batch_waits_between_chunks(tmp_path: Path, monkeypatch) -> Non
     slept: list[float] = []
 
     class DummyBuilder:
-        async def build(self, month: str, universe: list[str], config):  # noqa: ANN001
-            _ = (month, config)
+        async def build(self, month: str, universe: list[str], config, decision_date=None):  # noqa: ANN001
+            _ = (month, config, decision_date)
             trade_day = date(2025, 1, 31)
             return MonthlySnapshot(
                 decision_date=trade_day,
@@ -652,8 +646,8 @@ def test_build_us_snapshot_supports_external_artifacts_root(monkeypatch, tmp_pat
         def __init__(self, **providers):  # noqa: ANN003
             self.providers = providers
 
-        async def build(self, month, universe, config):  # noqa: ANN001, ANN202
-            _ = (month, config)
+        async def build(self, month, universe, config, decision_date=None):  # noqa: ANN001, ANN202
+            _ = (month, config, decision_date)
             ticker = universe[0]
             return MonthlySnapshot(
                 decision_date=date(2026, 3, 31),
