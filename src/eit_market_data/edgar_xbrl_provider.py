@@ -26,6 +26,7 @@ import os
 from datetime import date, timedelta
 from typing import Any
 
+from eit_market_data.core.pit import is_visible
 from eit_market_data.edgar_provider import (
     _get_httpx_client,
     _rate_limited_get,
@@ -141,7 +142,7 @@ def _pick_pit(entries: list[dict], as_of: date, *, instant: bool) -> dict[str, d
     for e in entries:
         filed = _as_date(e.get("filed"))
         end = _as_date(e.get("end"))
-        if filed is None or end is None or filed > as_of:
+        if not is_visible(filed, as_of) or end is None:
             continue
         if instant:
             key = end.isoformat()
@@ -204,7 +205,7 @@ def _standalone_flows(entries: list[dict], as_of: date) -> dict[str, dict]:
         filed = _as_date(e.get("filed"))
         start = _as_date(e.get("start"))
         end = _as_date(e.get("end"))
-        if filed is None or start is None or end is None or filed > as_of:
+        if not is_visible(filed, as_of) or start is None or end is None:
             continue
         if (end - start).days < _MIN_QUARTER_DAYS:
             continue  # drop sub-quarter / partial slivers
@@ -533,7 +534,7 @@ class EdgarXbrlFundamentalProvider:
                 for e in arr:
                     filed = _as_date(e.get("filed"))
                     end = _as_date(e.get("end"))
-                    if filed is None or end is None or filed > as_of or end > as_of:
+                    if not is_visible(filed, as_of) or not is_visible(end, as_of):
                         continue
                     if end < as_of - timedelta(days=_MAX_STALE_DAYS):
                         continue  # staleness guard

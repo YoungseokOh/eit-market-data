@@ -34,14 +34,10 @@ from typing import Any, Sequence
 from tqdm import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SRC_ROOT = PROJECT_ROOT / "src"
-if str(SRC_ROOT) not in sys.path:
-    sys.path.insert(0, str(SRC_ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _common import bootstrap, month_range as _month_range
 
-from dotenv import load_dotenv
-
-load_dotenv(PROJECT_ROOT / ".env")
+PROJECT_ROOT = bootstrap()
 
 logger = logging.getLogger("backfill")
 
@@ -283,20 +279,6 @@ class BackfillDartProvider:
 
 def _yyyymmdd(d: date) -> str:
     return d.strftime("%Y%m%d")
-
-
-def _month_range(start: str, end: str) -> list[str]:
-    """Generate YYYY-MM strings from *start* to *end* inclusive."""
-    months: list[str] = []
-    y, m = int(start[:4]), int(start[5:7])
-    ey, em = int(end[:4]), int(end[5:7])
-    while (y, m) <= (ey, em):
-        months.append(f"{y:04d}-{m:02d}")
-        m += 1
-        if m > 12:
-            m = 1
-            y += 1
-    return months
 
 
 def _last_business_day(year: int, month: int) -> date:

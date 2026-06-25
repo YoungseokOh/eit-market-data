@@ -27,24 +27,14 @@ kr = [
     "beautifulsoup4>=4.12",
     "pykrx>=1.2.7",
     "opendartreader>=0.2.3",
-    "finance-datareader",
-    "pyarrow",
+    "finance-datareader>=0.9.50",
+    "pyarrow>=14.0",
     "playwright>=1.50",
     "requests>=2.31",
     "setuptools<82",
 ]
 all = [
-    "yfinance>=0.2.36",
-    "fredapi>=0.5.2",
-    "httpx>=0.27",
-    "beautifulsoup4>=4.12",
-    "pykrx>=1.2.7",
-    "opendartreader>=0.2.3",
-    "finance-datareader",
-    "pyarrow",
-    "playwright>=1.50",
-    "requests>=2.31",
-    "setuptools<82",
+    "eit-market-data[real-data,kr]",
 ]
 dev = [
     "pytest>=8.0",
@@ -54,3 +44,43 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/eit_market_data"]
+
+[tool.hatch.metadata]
+# Allow the `all` extra to reference the package's own other extras.
+allow-direct-references = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+# Generated scripts and notebooks-as-scripts are intentionally noisy at module
+# scope (sys.path bootstrap, late imports); they keep per-file noqa instead.
+extend-exclude = ["artifacts", "artifacts_staging", "data"]
+
+[tool.ruff.lint]
+# Rule families that the codebase's existing `# noqa` codes opt into. Keeping
+# them in sync means a `# noqa: ANN001`/`BLE001`/etc. stays meaningful rather
+# than flagging an unused-directive warning.
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes (F401 unused import, etc.)
+    "W",    # pycodestyle warnings
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify (SIM115)
+    "A",    # flake8-builtins (A003)
+    "N",    # pep8-naming (N802)
+    "TC",   # flake8-type-checking (TC001/TC003)
+    "ANN",  # flake8-annotations (ANN001/ANN2xx/ANN401)
+    "BLE",  # flake8-blind-except (BLE001)
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests use bare fixtures and intentionally loose annotations.
+"tests/*" = ["ANN", "BLE", "E402"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Tests drive coroutines explicitly via asyncio.run(); auto mode also lets any
+# future `async def test_*` run without a per-test marker.
+asyncio_mode = "auto"

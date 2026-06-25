@@ -85,6 +85,34 @@ class FundamentalData(BaseModel):
         default=None, description="Closing price at decision date",
     )
 
+    def _ttm_flow(self, field: str) -> float | None:
+        """Sum an income/cash-flow field over the latest four quarters.
+
+        Returns None unless at least four quarters are present and all four
+        carry a value for ``field``. This is a derived convenience accessor: it
+        is a plain property (NOT a Pydantic ``computed_field``), so it is never
+        serialized and does not change the on-disk JSON shape — existing bundles
+        round-trip unchanged. ``quarters`` is stored report_date-descending, so
+        the first four are the trailing twelve months.
+        """
+        recent = self.quarters[:4]
+        if len(recent) < 4:
+            return None
+        values = [getattr(q, field, None) for q in recent]
+        if any(v is None for v in values):
+            return None
+        return float(sum(values))
+
+    @property
+    def ttm_revenue(self) -> float | None:
+        """Trailing-twelve-month revenue, or None if the window is incomplete."""
+        return self._ttm_flow("revenue")
+
+    @property
+    def ttm_net_income(self) -> float | None:
+        """Trailing-twelve-month net income, or None if the window is incomplete."""
+        return self._ttm_flow("net_income")
+
 
 # ---------------------------------------------------------------------------
 # Filing / qualitative data

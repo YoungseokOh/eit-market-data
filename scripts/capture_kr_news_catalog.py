@@ -3,32 +3,21 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import csv
 import sys
 from datetime import date
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SRC_ROOT = PROJECT_ROOT / "src"
-if str(SRC_ROOT) not in sys.path:
-    sys.path.insert(0, str(SRC_ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _common import bootstrap, load_tickers as _load_tickers
 
-from dotenv import load_dotenv
+PROJECT_ROOT = bootstrap()
 
-load_dotenv(PROJECT_ROOT / ".env")
-
-from eit_market_data.kr.market_helpers import normalize_ticker
 from eit_market_data.kr.news_catalog import KrNewsCatalogStore
 from eit_market_data.kr.naver_news_provider import NaverArchiveNewsProvider
 
 
 def load_tickers(path: Path) -> list[str]:
-    with path.open(newline="", encoding="utf-8") as handle:
-        return [
-            normalize_ticker(str(row.get("ticker", "")).strip())
-            for row in csv.DictReader(handle)
-            if str(row.get("ticker", "")).strip()
-        ]
+    return _load_tickers(path, "kr")
 
 
 async def capture_catalog(

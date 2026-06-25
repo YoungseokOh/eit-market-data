@@ -9,8 +9,8 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-
+from eit_market_data.core.price_frame import price_bars_from_frame
+from eit_market_data.core.sector_math import compute_sector_averages
 from eit_market_data.kr.market_helpers import fetch_index_ohlcv_frame, normalize_ticker
 from eit_market_data.schemas.snapshot import (
     FilingData,
@@ -73,25 +73,7 @@ class FdrNaverPriceProvider:
 
         start = as_of - timedelta(days=max(int(lookback_days * 1.8), 30))
         df = fdr.DataReader(f"NAVER:{ticker}", start.strftime("%Y-%m-%d"), as_of.strftime("%Y-%m-%d"))
-        if df is None or df.empty:
-            return []
-
-        bars: list[PriceBar] = []
-        for idx, row in df.iterrows():
-            bar_date = idx.date() if hasattr(idx, "date") else idx
-            if not isinstance(bar_date, date) or bar_date > as_of:
-                continue
-            bars.append(
-                PriceBar(
-                    date=bar_date,
-                    open=round(float(row.get("Open", 0) or 0), 2),
-                    high=round(float(row.get("High", 0) or 0), 2),
-                    low=round(float(row.get("Low", 0) or 0), 2),
-                    close=round(float(row.get("Close", 0) or 0), 2),
-                    volume=float(row.get("Volume", 0) or 0),
-                )
-            )
-        return bars[-lookback_days:]
+        return price_bars_from_frame(df, as_of, lookback_days)
 
 
 class SeedSectorProvider:
@@ -129,44 +111,13 @@ class SeedSectorProvider:
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        metrics: dict[str, list[float]] = {}
-        for result in results:
-            if isinstance(result, Exception) or not getattr(result, "quarters", None):
-                continue
-            quarter = result.quarters[0]
-            revenue = quarter.revenue
-            total_assets = quarter.total_assets
-            if not revenue or not total_assets or total_assets == 0:
-                continue
-
-            def _add(key: str, value: float | None) -> None:
-                if value is not None:
-                    metrics.setdefault(key, []).append(value)
-
-            _add("roa", (quarter.net_income or 0) / total_assets)
-            _add(
-                "roe",
-                (quarter.net_income or 0) / quarter.total_equity
-                if quarter.total_equity
-                else None,
-            )
-            _add("gross_margin", (quarter.gross_profit or 0) / revenue)
-            _add("operating_margin", (quarter.operating_income or 0) / revenue)
-            _add("net_margin", (quarter.net_income or 0) / revenue)
-            if quarter.current_liabilities and quarter.current_liabilities > 0:
-                _add("current_ratio", (quarter.current_assets or 0) / quarter.current_liabilities)
-            if quarter.total_equity and quarter.total_equity > 0:
-                _add("debt_to_equity", (quarter.total_debt or 0) / quarter.total_equity)
-            _add("asset_turnover", revenue / total_assets)
-            if result.last_close_price and quarter.eps and quarter.eps > 0:
-                _add("pe_ttm", result.last_close_price / (quarter.eps * 4))
-
-        avg_metrics = {
-            key: round(float(np.mean(values)), 4)
-            for key, values in metrics.items()
-            if values
-        }
-        return SectorAverages(sector=sector, avg_metrics=avg_metrics)
+        funds = [
+            result
+            for result in results
+            if not isinstance(result, Exception)
+            and isinstance(result, FundamentalData)
+        ]
+        return compute_sector_averages(sector, funds)
 
     @staticmethod
     def _load_sector_seed(path: Path | None) -> dict[str, str]:
@@ -235,24 +186,7 @@ class FdrBenchmarkProvider:
         except Exception as exc:
             logger.warning("FDR benchmark fetch failed: %s", exc)
             return []
-        if frame is None or frame.empty:
-            return []
-        bars: list[PriceBar] = []
-        for idx, row in frame.iterrows():
-            bar_date = idx.date() if hasattr(idx, "date") else idx
-            if not isinstance(bar_date, date) or bar_date > as_of:
-                continue
-            bars.append(
-                PriceBar(
-                    date=bar_date,
-                    open=round(float(row.get("Open", 0) or 0), 2),
-                    high=round(float(row.get("High", 0) or 0), 2),
-                    low=round(float(row.get("Low", 0) or 0), 2),
-                    close=round(float(row.get("Close", 0) or 0), 2),
-                    volume=float(row.get("Volume", 0) or 0),
-                )
-            )
-        return bars[-lookback_days:]
+        return price_bars_from_frame(frame, as_of, lookback_days)
 
 
 class NullBenchmarkProvider:
