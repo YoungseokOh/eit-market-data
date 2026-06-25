@@ -70,22 +70,13 @@ def scan_snapshot(path: Path) -> dict[str, object]:
     }
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--root",
-        default=str(DEFAULT_GLOB_ROOT),
-        help="Root dir holding <month>/snapshot.json bundles.",
-    )
-    parser.add_argument(
-        "--max-show",
-        type=int,
-        default=5,
-        help="Max example violations to print per month.",
-    )
-    args = parser.parse_args()
+def run_scan(root: Path, max_show: int) -> int:
+    """Scan ``<root>/*/snapshot.json`` bundles; return 1 on any violation.
 
-    root = Path(args.root)
+    Market-agnostic: both the KR and US look-ahead scanners call this with their
+    own default root. The exit-code contract (1 on any violation, else 0) gates
+    CI/rebuilds, so it must stay stable.
+    """
     paths = sorted(root.glob("*/snapshot.json"))
     if not paths:
         print(f"No snapshots found under {root}")
@@ -98,14 +89,31 @@ def main() -> int:
         total += len(viols)
         head = f"{report['month']}  decision={report['decision_date']}  violations={len(viols)}"
         if viols:
-            examples = ", ".join(viols[: args.max_show])
-            more = f", +{len(viols) - args.max_show} more" if len(viols) > args.max_show else ""
+            examples = ", ".join(viols[:max_show])
+            more = f", +{len(viols) - max_show} more" if len(viols) > max_show else ""
             print(f"FAIL  {head}  [{examples}{more}]")
         else:
             print(f"OK    {head}")
 
     print(f"\nTOTAL violations across {len(paths)} bundle(s): {total}")
     return 1 if total else 0
+
+
+def main(default_root: Path = DEFAULT_GLOB_ROOT, description: str | None = None) -> int:
+    parser = argparse.ArgumentParser(description=description or __doc__)
+    parser.add_argument(
+        "--root",
+        default=str(default_root),
+        help="Root dir holding <month>/snapshot.json bundles.",
+    )
+    parser.add_argument(
+        "--max-show",
+        type=int,
+        default=5,
+        help="Max example violations to print per month.",
+    )
+    args = parser.parse_args()
+    return run_scan(Path(args.root), args.max_show)
 
 
 if __name__ == "__main__":

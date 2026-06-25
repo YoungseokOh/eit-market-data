@@ -6,14 +6,10 @@ import sys
 from datetime import date
 from pathlib import Path
 
-from dotenv import load_dotenv
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _common import bootstrap
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SRC_ROOT = PROJECT_ROOT / "src"
-if str(SRC_ROOT) not in sys.path:
-    sys.path.insert(0, str(SRC_ROOT))
-
-load_dotenv(PROJECT_ROOT / ".env")
+PROJECT_ROOT = bootstrap()
 
 from eit_market_data.local_collection import run_local_collection
 

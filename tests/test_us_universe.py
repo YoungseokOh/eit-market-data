@@ -39,6 +39,55 @@ def test_pit_universe_unions_ndx(monkeypatch) -> None:
     assert u == ["AAPL", "ARM"]
 
 
+def test_pit_universe_drops_unlisted_ndx_phantoms(monkeypatch) -> None:
+    """drop_unlisted removes NDX-only names with no as-of listing; SP500 PIT kept."""
+    # AAPL is an S&P 500 PIT member; ARM is NDX-only and not yet listed in early 2023.
+    monkeypatch.setitem(uu._CACHE, "sp500", ({"AAPL"}, []))
+    monkeypatch.setitem(uu._CACHE, "ndx", {"AAPL", "ARM", "MSFT"})
+    monkeypatch.setitem(uu._CACHE, "cikmap", {"AAPL": "1", "ARM": "2", "MSFT": "3"})
+
+    # ARM has no price history as-of; MSFT does.
+    listed = {"MSFT": True, "ARM": False}
+
+    def has_listing(ticker, as_of):  # noqa: ANN001, ANN202
+        return listed.get(ticker, True)
+
+    u = uu.pit_universe(date(2023, 2, 28), drop_unlisted=has_listing)
+    assert "ARM" not in u  # NDX-only phantom dropped
+    assert "MSFT" in u  # NDX-only but listed -> kept
+    assert "AAPL" in u  # S&P 500 PIT member -> always kept
+
+
+def test_pit_universe_keeps_sp500_member_even_if_listing_check_false(monkeypatch) -> None:
+    """An S&P 500 PIT member is never dropped, even if the listing probe says no."""
+    monkeypatch.setitem(uu._CACHE, "sp500", ({"AAPL"}, []))
+    monkeypatch.setitem(uu._CACHE, "ndx", {"AAPL"})
+    monkeypatch.setitem(uu._CACHE, "cikmap", {"AAPL": "1"})
+    u = uu.pit_universe(date(2023, 2, 28), drop_unlisted=lambda t, a: False)
+    assert u == ["AAPL"]
+
+
+def test_pit_universe_keeps_phantom_on_listing_check_error(monkeypatch) -> None:
+    """A transient error in the listing probe keeps the name (no false drops)."""
+    monkeypatch.setitem(uu._CACHE, "sp500", ({"AAPL"}, []))
+    monkeypatch.setitem(uu._CACHE, "ndx", {"AAPL", "ARM"})
+    monkeypatch.setitem(uu._CACHE, "cikmap", {"AAPL": "1", "ARM": "2"})
+
+    def boom(ticker, as_of):  # noqa: ANN001, ANN202
+        raise RuntimeError("yfinance down")
+
+    u = uu.pit_universe(date(2023, 2, 28), drop_unlisted=boom)
+    assert "ARM" in u and "AAPL" in u
+
+
+def test_pit_universe_none_hook_keeps_ndx_union(monkeypatch) -> None:
+    """drop_unlisted=None preserves prior behavior (full NDX union)."""
+    monkeypatch.setitem(uu._CACHE, "sp500", ({"AAPL"}, []))
+    monkeypatch.setitem(uu._CACHE, "ndx", {"ARM"})
+    monkeypatch.setitem(uu._CACHE, "cikmap", {"AAPL": "1", "ARM": "2"})
+    assert uu.pit_universe(date(2023, 2, 28)) == ["AAPL", "ARM"]
+
+
 def test_dedup_by_cik_collapses_share_classes(monkeypatch) -> None:
     # GOOG/GOOGL share a CIK -> collapse to one (shortest symbol kept); unknown kept.
     monkeypatch.setitem(

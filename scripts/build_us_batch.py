@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import csv
 import json
 import logging
 import sys
@@ -23,20 +22,21 @@ from typing import Any, Iterable, Sequence
 
 from io import StringIO
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _common import bootstrap, load_tickers as _load_tickers, write_json
 
 # Guard against indefinite hangs on stuck yfinance/SEC sockets (no per-request
 # timeout in the providers): a stalled read raises after 90s instead of hanging
 # forever. Providers catch the exception and return empty, so one slow ticker is
 # skipped rather than freezing the whole batch.
+#
+# This MUST run before importing eit_market_data below so the default timeout is
+# in effect when the providers open their first sockets.
 import socket as _socket
 
 _socket.setdefaulttimeout(90)
 
-from dotenv import load_dotenv
-
-load_dotenv(PROJECT_ROOT / ".env")
+PROJECT_ROOT = bootstrap()
 
 from eit_market_data.snapshot import (
     SnapshotBuilder,
@@ -99,14 +99,7 @@ def _month_end_weekday(year: int, month: int) -> date:
 
 
 def _load_csv_tickers(path: Path) -> list[str]:
-    with path.open("r", encoding="utf-8") as handle:
-        reader = csv.DictReader(handle)
-        tickers: list[str] = []
-        for row in reader:
-            ticker = str(row.get("ticker", "")).strip().upper().replace(".", "-")
-            if ticker:
-                tickers.append(ticker)
-    return tickers
+    return _load_tickers(path, "us")
 
 
 def _download_table(url: str) -> list[Any]:
@@ -251,61 +244,47 @@ def _write_snapshot_bundle(
 
     snapshot_path = month_dir / "snapshot.json"
     snapshot_json = serialize_snapshot(snapshot)
-    snapshot_path.write_text(
-        json.dumps(snapshot_json, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
+    write_json(snapshot_path, snapshot_json)
 
     metadata_path = month_dir / "metadata.json"
     metadata_json = serialize_snapshot_metadata(metadata)
-    metadata_path.write_text(
-        json.dumps(metadata_json, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
+    write_json(metadata_path, metadata_json)
 
     manifest_path = month_dir / "manifest.json"
-    manifest_path.write_text(
-        json.dumps(
-            {
-                "market": "us",
-                "month": month,
-                "snapshot": "snapshot.json",
-                "metadata": "metadata.json",
-                "summary": "summary.json",
-                "created_at": metadata.created_at,
-            },
-            indent=2,
-            sort_keys=True,
-        ),
-        encoding="utf-8",
+    write_json(
+        manifest_path,
+        {
+            "market": "us",
+            "month": month,
+            "snapshot": "snapshot.json",
+            "metadata": "metadata.json",
+            "summary": "summary.json",
+            "created_at": metadata.created_at,
+        },
     )
 
     summary_path = month_dir / "summary.json"
-    summary_path.write_text(
-        json.dumps(
-            {
-                "status": "ok",
-                "market": "us",
-                "month": month,
-                "universe_size": universe_size,
-                "price_tickers": len(snapshot.prices),
-                "fundamental_tickers": len(snapshot.fundamentals),
-                "filing_tickers": len(snapshot.filings),
-                "benchmark_bars": len(snapshot.benchmark_prices),
-                "prices_count": {t: len(v) for t, v in snapshot.prices.items()},
-                "fundamentals_count": {t: len(v.quarters) for t, v in snapshot.fundamentals.items()},
-                "macro_risk_keys": len(snapshot.macro.market_risk),
-                "files": {
-                    "snapshot": str(snapshot_path.relative_to(artifacts_root)),
-                    "metadata": str(metadata_path.relative_to(artifacts_root)),
-                    "manifest": str(manifest_path.relative_to(artifacts_root)),
-                    "summary": str(summary_path.relative_to(artifacts_root)),
-                },
+    write_json(
+        summary_path,
+        {
+            "status": "ok",
+            "market": "us",
+            "month": month,
+            "universe_size": universe_size,
+            "price_tickers": len(snapshot.prices),
+            "fundamental_tickers": len(snapshot.fundamentals),
+            "filing_tickers": len(snapshot.filings),
+            "benchmark_bars": len(snapshot.benchmark_prices),
+            "prices_count": {t: len(v) for t, v in snapshot.prices.items()},
+            "fundamentals_count": {t: len(v.quarters) for t, v in snapshot.fundamentals.items()},
+            "macro_risk_keys": len(snapshot.macro.market_risk),
+            "files": {
+                "snapshot": str(snapshot_path.relative_to(artifacts_root)),
+                "metadata": str(metadata_path.relative_to(artifacts_root)),
+                "manifest": str(manifest_path.relative_to(artifacts_root)),
+                "summary": str(summary_path.relative_to(artifacts_root)),
             },
-            sort_keys=True,
-            indent=2,
-        ),
-        encoding="utf-8",
+        },
     )
 
 
