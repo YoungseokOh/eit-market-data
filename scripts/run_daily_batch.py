@@ -22,6 +22,12 @@ OUTPUT_ROOT = PROJECT_ROOT / "out"
 # Per-run logs/data stay under out/<run>/; snapshots land here once, by market.
 BUNDLE_ROOT = PROJECT_ROOT / "artifacts"
 
+# Tiny smoke universe for explicit preflight/dev runs only. NEVER used as the
+# month-end production universe — that resolves to the survivorship-free PIT list
+# (see resolve_us_universe). Writing this 5-ticker list over the full month-end
+# bundle is exactly the clobber bug this gate exists to prevent.
+US_SMOKE_UNIVERSE = "AAPL,MSFT,GOOGL,AMZN,NVDA"
+
 
 @dataclass
 class StepResult:
@@ -38,6 +44,44 @@ def display_path(path: Path) -> str:
         return str(path.relative_to(PROJECT_ROOT))
     except ValueError:
         return str(path)
+
+
+def us_is_month_end(as_of: date) -> bool:
+    """True when ``as_of`` is the last XNYS (NYSE/Nasdaq) trading day of its month.
+
+    Mirrors the KR ``should_build_monthly_snapshot`` gate in
+    scripts/build_kr_snapshot.py, but for the US trading calendar so the US
+    snapshot bundle is only (re)built at month-end and ordinary weekdays do not
+    overwrite it with a partial universe.
+    """
+    from eit_market_data.core.calendar import _last_business_day
+
+    return as_of == _last_business_day(as_of.year, as_of.month, "XNYS")
+
+
+def resolve_us_universe(
+    as_of: date,
+    *,
+    explicit_universe: str | None,
+    universe_mode: str,
+) -> list[str]:
+    """Resolve the US ticker list for a snapshot build.
+
+    Precedence:
+      1. An explicit ``--us-universe`` always wins (back-compat for callers that
+         pin a list), regardless of mode.
+      2. ``--us-universe-mode pit`` reconstructs the survivorship-free S&P 500 +
+         Nasdaq-100 universe as of ``as_of`` (network calls — only invoked at
+         month-end or under --force-snapshot).
+      3. Otherwise fall back to the tiny smoke list (explicit smoke/preflight).
+    """
+    if explicit_universe:
+        return [t.strip() for t in explicit_universe.split(",") if t.strip()]
+    if universe_mode == "pit":
+        from eit_market_data.us_universe import pit_universe
+
+        return pit_universe(as_of)
+    return [t.strip() for t in US_SMOKE_UNIVERSE.split(",") if t.strip()]
 
 
 def previous_business_day(reference_date: date) -> date:
@@ -132,7 +176,8 @@ def run_daily_batch(
     force_snapshot: bool,
     snapshot_profile: str,
     bundle_root: Path = BUNDLE_ROOT,
-    us_universe: str = "AAPL,MSFT,GOOGL,AMZN,NVDA",
+    us_universe: str | None = None,
+    us_universe_mode: str = "pit",
     skip_us: bool = False,
 ) -> tuple[int, dict[str, object]]:
     run_root = build_run_root(output_root, as_of)
@@ -215,24 +260,50 @@ def run_daily_batch(
             snapshot.status = snapshot_status
             snapshot.detail = snapshot_detail
 
-    # Build US snapshot (unless skipped)
+    # Build US snapshot — month-end gated, mirroring the KR snapshot gate. On
+    # ordinary weekdays the full month-end bundle is left untouched; only the
+    # last XNYS trading day of the month (or an explicit --force-snapshot)
+    # rebuilds it, and then with the survivorship-free PIT universe rather than
+    # the 5-ticker smoke list. This prevents the daily job from clobbering the
+    # ~512-ticker bundle with a partial one.
     if not skip_us and overall_status != "failed":
-        us_snapshot_cmd = [
-            sys.executable,
-            "scripts/build_us_snapshot.py",
-            "--as-of",
-            as_of.isoformat(),
-            "--universe",
-            us_universe,
-            "--artifacts-root",
-            str(bundle_root),
-            "--market-subdir",
-            "us",
-        ]
-        us_snapshot = run_step("build_us_snapshot", us_snapshot_cmd, logs_dir)
-        step_results.append(us_snapshot)
-        if us_snapshot.status == "failed":
-            overall_status = "degraded"  # US failure is degraded, not failed
+        build_us = force_snapshot or us_is_month_end(as_of)
+        if not build_us:
+            us_snapshot = StepResult(
+                name="build_us_snapshot",
+                status="skipped",
+                return_code=0,
+                command=[],
+                log_path="",
+                detail="not_month_end_business_day",
+            )
+            step_results.append(us_snapshot)
+        else:
+            resolved_universe = resolve_us_universe(
+                as_of,
+                explicit_universe=us_universe,
+                universe_mode=us_universe_mode,
+            )
+            us_snapshot_cmd = [
+                sys.executable,
+                "scripts/build_us_snapshot.py",
+                "--as-of",
+                as_of.isoformat(),
+                "--universe",
+                ",".join(resolved_universe),
+                "--artifacts-root",
+                str(bundle_root),
+                "--market-subdir",
+                "us",
+            ]
+            us_snapshot = run_step("build_us_snapshot", us_snapshot_cmd, logs_dir)
+            step_results.append(us_snapshot)
+            if us_snapshot.status == "failed":
+                overall_status = "degraded"  # US failure is degraded, not failed
+            else:
+                us_status, us_detail = inspect_snapshot_step(bundle_root, as_of, "us")
+                us_snapshot.status = us_status
+                us_snapshot.detail = us_detail
 
     # Refresh the per-ticker daily OHLCV price store every run (NOT month-gated,
     # unlike the snapshot bundle). The store universe is derived from the
@@ -310,8 +381,18 @@ def main() -> None:
     )
     parser.add_argument(
         "--us-universe",
-        default="AAPL,MSFT,GOOGL,AMZN,NVDA",
-        help="Comma-separated list of US tickers (default: top 5).",
+        default=None,
+        help="Explicit comma-separated US tickers. Overrides --us-universe-mode "
+        "(back-compat). When omitted, the universe is resolved from "
+        "--us-universe-mode.",
+    )
+    parser.add_argument(
+        "--us-universe-mode",
+        default="pit",
+        choices=["pit", "smoke"],
+        help="US universe resolution when --us-universe is not given. "
+        "pit = survivorship-free S&P500+NDX as of as-of (full month-end bundle); "
+        "smoke = 5-ticker preflight list. Default pit.",
     )
     parser.add_argument(
         "--skip-us",
@@ -334,6 +415,7 @@ def main() -> None:
         snapshot_profile=args.snapshot_profile,
         bundle_root=Path(args.bundle_root),
         us_universe=args.us_universe,
+        us_universe_mode=args.us_universe_mode,
         skip_us=args.skip_us,
     )
     print(

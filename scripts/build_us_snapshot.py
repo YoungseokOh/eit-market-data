@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import sys
 from datetime import date
@@ -48,6 +49,19 @@ def _display_path(path: Path) -> str:
         return str(path)
 
 
+def _existing_universe_size(snapshot_path: Path) -> int:
+    """Universe size of an existing snapshot.json, or 0 if absent/unreadable."""
+    if not snapshot_path.exists():
+        return 0
+    try:
+        existing = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("could not read existing snapshot at %s: %s", snapshot_path, exc)
+        return 0
+    universe = existing.get("universe")
+    return len(universe) if isinstance(universe, list) else 0
+
+
 async def build_us_snapshot(
     as_of: date,
     universe: list[str],
@@ -69,6 +83,40 @@ async def build_us_snapshot(
     effective_root = artifacts_root / market_subdir if market_subdir else artifacts_root
     month_dir = effective_root / "snapshots" / as_of.strftime("%Y-%m")
     month_dir.mkdir(parents=True, exist_ok=True)
+
+    # Anti-shrink tripwire: never overwrite a larger existing bundle with a
+    # smaller universe. This is a cheap, caller-agnostic safety net against the
+    # daily job (or any caller) clobbering the full month-end bundle with a
+    # partial/smoke universe. Equal-or-larger writes are allowed. Checked before
+    # the expensive provider build so a refused run does no network work.
+    snapshot_path = month_dir / "snapshot.json"
+    existing_size = _existing_universe_size(snapshot_path)
+    if existing_size > len(universe):
+        reason = "would_shrink_bundle"
+        logger.warning(
+            "Refusing to overwrite %s: existing universe has %d tickers, "
+            "incoming has %d (%s).",
+            snapshot_path,
+            existing_size,
+            len(universe),
+            reason,
+        )
+        summary = {
+            "status": "skipped",
+            "reason": reason,
+            "market": "us",
+            "as_of": as_of.isoformat(),
+            "existing_universe_size": existing_size,
+            "incoming_universe_size": len(universe),
+        }
+        write_json(month_dir / "summary.json", summary)
+        return {
+            "status": "skipped",
+            "reason": reason,
+            "as_of": as_of.isoformat(),
+            "existing_universe_size": existing_size,
+            "incoming_universe_size": len(universe),
+        }
 
     logger.info(
         f"Building US snapshot: as_of={as_of}, tickers={universe}, "
@@ -213,6 +261,10 @@ def main() -> None:
 
     if isinstance(exit_code, dict) and exit_code.get("status") == "ok":
         print(f"[SUMMARY] status=ok as_of={exit_code['as_of']} snapshot_dir={exit_code['snapshot_dir']}")
+        sys.exit(0)
+    elif isinstance(exit_code, dict) and exit_code.get("status") == "skipped":
+        # Refused to shrink an existing larger bundle — not a failure.
+        print(f"[SUMMARY] status=skipped reason={exit_code.get('reason')} as_of={as_of}")
         sys.exit(0)
     else:
         print(f"[SUMMARY] status=failed as_of={as_of}")
