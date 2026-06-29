@@ -670,6 +670,45 @@ class DartProvider:
                     return val
         return None
 
+    def _pick_cumulative_value(self, df: Any, candidates: list[str]) -> float | None:
+        """Pick the cumulative (YTD) value for a flow account.
+
+        DART interim ``finstate`` reports expose the single-quarter (standalone
+        3-month) value in ``thstrm_amount`` and the cumulative year-to-date value
+        in ``thstrm_add_amount``. Flow fields must use the cumulative column so the
+        downstream cumulative-subtraction in ``_normalize_quarter_values`` yields a
+        correct per-quarter figure. ``thstrm_add_amount`` is absent for the annual
+        report (reprt_code 11011) and equal to ``thstrm_amount`` for Q1, so fall
+        back to ``thstrm_amount`` when the cumulative column is missing/empty.
+        """
+        if df is None or df.empty or "account_nm" not in df.columns:
+            return None
+
+        has_add = "thstrm_add_amount" in df.columns
+        names = df["account_nm"].fillna("").astype(str).str.strip()
+
+        def _read(row: Any) -> float | None:
+            if has_add:
+                cumulative = _parse_amount_to_million(row.get("thstrm_add_amount"))
+                if cumulative is not None:
+                    return cumulative
+            return _parse_amount_to_million(row.get("thstrm_amount"))
+
+        for candidate in candidates:
+            exact = df.loc[names == candidate]
+            if not exact.empty:
+                val = _read(exact.iloc[0])
+                if val is not None:
+                    return val
+
+        for candidate in candidates:
+            partial = df.loc[names.str.contains(candidate, regex=False)]
+            if not partial.empty:
+                val = _read(partial.iloc[0])
+                if val is not None:
+                    return val
+        return None
+
     def _pick_eps_value(self, df: Any) -> float | None:
         """Pick EPS value using native KRW unit (no /1000 conversion)."""
         if df is None or df.empty or "account_nm" not in df.columns:
@@ -719,11 +758,14 @@ class DartProvider:
 
     def _build_raw_quarter_data(self, df_fin: Any) -> dict[str, float | None]:
         raw = {
-            "revenue": self._pick_account_value(df_fin, _ACCOUNT_MAP["revenue"]),
-            "operating_income": self._pick_account_value(
+            # Flow (income/cash-flow) fields: read the cumulative YTD column so the
+            # downstream per-quarter decomposition is correct.
+            "revenue": self._pick_cumulative_value(df_fin, _ACCOUNT_MAP["revenue"]),
+            "operating_income": self._pick_cumulative_value(
                 df_fin, _ACCOUNT_MAP["operating_income"]
             ),
-            "net_income": self._pick_account_value(df_fin, _ACCOUNT_MAP["net_income"]),
+            "net_income": self._pick_cumulative_value(df_fin, _ACCOUNT_MAP["net_income"]),
+            # Stock (balance-sheet) fields: point-in-time balances, read as-is.
             "total_assets": self._pick_account_value(df_fin, _ACCOUNT_MAP["total_assets"]),
             "total_liabilities": self._pick_account_value(
                 df_fin, _ACCOUNT_MAP["total_liabilities"]
@@ -733,19 +775,19 @@ class DartProvider:
             "current_liabilities": self._pick_account_value(
                 df_fin, _ACCOUNT_MAP["current_liabilities"]
             ),
-            "gross_profit": self._pick_account_value(df_fin, _ACCOUNT_MAP["gross_profit"]),
+            "gross_profit": self._pick_cumulative_value(df_fin, _ACCOUNT_MAP["gross_profit"]),
             "total_debt": self._pick_account_value(df_fin, _ACCOUNT_MAP["total_debt"]),
             "eps": self._pick_eps_value(df_fin),
-            "interest_expense": self._pick_account_value(
+            "interest_expense": self._pick_cumulative_value(
                 df_fin, _ACCOUNT_MAP["interest_expense"]
             ),
-            "operating_cash_flow": self._pick_account_value(
+            "operating_cash_flow": self._pick_cumulative_value(
                 df_fin, _ACCOUNT_MAP["operating_cash_flow"]
             ),
-            "capital_expenditure": self._pick_account_value(
+            "capital_expenditure": self._pick_cumulative_value(
                 df_fin, _ACCOUNT_MAP["capital_expenditure"]
             ),
-            "cost_of_goods_sold": self._pick_account_value(
+            "cost_of_goods_sold": self._pick_cumulative_value(
                 df_fin, _ACCOUNT_MAP["cost_of_goods_sold"]
             ),
             "cash_and_equivalents": self._pick_account_value(
