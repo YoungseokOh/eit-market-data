@@ -109,10 +109,21 @@ def _parse_date_yyyymmdd(raw: Any) -> date | None:
         return None
 
 
-def _parse_amount_to_million(raw: Any) -> float | None:
-    """Parse DART amount text to KRW millions.
+def _parse_amount_to_krw(raw: Any) -> float | None:
+    """Parse a DART financial-statement amount to raw KRW (won).
 
-    DART financial statement values are typically in KRW thousands.
+    DART ``thstrm_amount`` / ``thstrm_add_amount`` are reported in full KRW
+    (won). We preserve that native magnitude so aggregate fundamentals share the
+    same unit as ``market_cap`` (raw won, via ``market_helpers`` 시가총액) and as
+    the US bundle (raw USD via ``edgar_xbrl_provider``). This keeps the
+    consumer's cross-market ratios unit-correct without per-market scaling:
+    ``net_income * 4 / market_cap`` (earnings yield), ROA, ROE, and
+    ``market_cap / total_equity`` (P/B) all become unitless and realistic.
+
+    NOTE: a prior version divided by 1000 here (despite the ``_to_million``
+    name), silently storing KRW *thousands* — 1000x smaller than ``market_cap``
+    (raw won). That uniform scale error preserved ranking but made absolute
+    yields 1000x off.
     """
     if raw is None:
         return None
@@ -130,7 +141,7 @@ def _parse_amount_to_million(raw: Any) -> float | None:
         return None
     if negative:
         value = -value
-    return round(value / 1000.0, 1)
+    return round(value, 1)
 
 
 def _parse_eps(raw: Any) -> float | None:
@@ -658,14 +669,14 @@ class DartProvider:
         for candidate in candidates:
             exact = df.loc[names == candidate]
             if not exact.empty:
-                val = _parse_amount_to_million(exact.iloc[0].get("thstrm_amount"))
+                val = _parse_amount_to_krw(exact.iloc[0].get("thstrm_amount"))
                 if val is not None:
                     return val
 
         for candidate in candidates:
             partial = df.loc[names.str.contains(candidate, regex=False)]
             if not partial.empty:
-                val = _parse_amount_to_million(partial.iloc[0].get("thstrm_amount"))
+                val = _parse_amount_to_krw(partial.iloc[0].get("thstrm_amount"))
                 if val is not None:
                     return val
         return None
@@ -689,10 +700,10 @@ class DartProvider:
 
         def _read(row: Any) -> float | None:
             if has_add:
-                cumulative = _parse_amount_to_million(row.get("thstrm_add_amount"))
+                cumulative = _parse_amount_to_krw(row.get("thstrm_add_amount"))
                 if cumulative is not None:
                     return cumulative
-            return _parse_amount_to_million(row.get("thstrm_amount"))
+            return _parse_amount_to_krw(row.get("thstrm_amount"))
 
         for candidate in candidates:
             exact = df.loc[names == candidate]

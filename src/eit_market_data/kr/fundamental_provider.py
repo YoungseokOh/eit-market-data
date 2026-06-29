@@ -233,13 +233,20 @@ class CompositeKrFundamentalProvider:
                 for quarter in quarters
             ]
 
-            # Calculate EPS from net_income / issued_shares if EPS is missing
+            # Prefer DART's natively-reported EPS (already populated on the
+            # quarter in native KRW/share); only DERIVE a fallback when it is
+            # missing. net_income is stored in raw KRW (won) and issued_shares
+            # is a raw share count, so the derived EPS is simply
+            # net_income / issued_shares with NO unit factor.
+            #
+            # (The previous code multiplied by 1_000_000 assuming net_income was
+            # in KRW millions; combined with the parser actually storing KRW
+            # thousands, the derived EPS came out ~1000x too large. Both the
+            # parser unit and this factor are now corrected to raw won.)
             updated_quarters = []
             for quarter in quarters:
                 if quarter.eps is None and quarter.net_income and issued_shares and issued_shares > 0:
-                    # net_income is in KRW millions, issued_shares is in units
-                    # eps = (net_income * 1,000,000) / issued_shares
-                    eps = round((quarter.net_income * 1_000_000) / issued_shares, 0)
+                    eps = round(quarter.net_income / issued_shares, 2)
                     updated_quarters.append(quarter.model_copy(update={"eps": eps}))
                 else:
                     updated_quarters.append(quarter)

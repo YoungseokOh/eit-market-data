@@ -105,7 +105,7 @@ def _normalize_ticker(ticker: str) -> str:
 ```
 
 - **pykrx 날짜 포맷은 `YYYYMMDD` string**이다. `date_to_yyyymmdd()` 헬퍼를 사용한다.
-- **재무 금액 단위는 KRW millions (백만원)**이다. DART/opendartreader 원본이 원(KRW) 단위일 경우 `/ 1_000_000`으로 변환 후 저장한다.
+- **재무 집계 금액 단위는 raw KRW (원)**이다. DART/opendartreader 원본(`thstrm_amount`)은 이미 원 단위이므로 **단위 변환 없이 그대로 저장**한다(`/ 1000`, `/ 1_000_000` 금지). 이는 `market_cap`(원, 시가총액)과 US 번들(raw USD)과 단위를 맞춰, 소비자(eit-research)의 `net_income/market_cap`·ROA·ROE·`market_cap/total_equity` 비율이 시장별 스케일링 없이 unitless하게 맞도록 하기 위함이다. 주당 값(`eps`, `dividends_per_share`)과 `last_close_price`는 주당 원, `issued_shares`는 원시 주식 수다.
 - KOSPI 벤치마크 종목코드: `"1001"`, KOSDAQ: `"2001"`.
 
 ### Logging

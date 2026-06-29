@@ -33,8 +33,14 @@ class PriceBar(BaseModel):
 class QuarterlyFinancials(BaseModel):
     """One quarter of financial data (P&L, B/S, CF items).
 
-    All monetary values in the reporting currency (millions).
-    None means the value is unavailable.
+    Aggregate monetary values (revenue, net_income, total_assets, ...) are in
+    the reporting currency's *raw native units* — KRW (won) for KR via DART and
+    USD for US via SEC XBRL. This matches ``FundamentalData.market_cap`` (also
+    raw native currency), so consumer ratios such as ``net_income/market_cap``,
+    ROA, ROE and ``market_cap/total_equity`` are unitless and need no per-market
+    scaling. Per-share fields (``eps``, ``dividends_per_share``) and
+    ``last_close_price`` are in native currency per share. ``issued_shares`` is
+    a raw share count. None means the value is unavailable.
     """
 
     fiscal_quarter: str = Field(description="e.g. '2024Q1'")
@@ -79,7 +85,11 @@ class FundamentalData(BaseModel):
         description="Most recent quarters first, ordered by report_date descending.",
     )
     market_cap: float | None = Field(
-        default=None, description="As of decision date",
+        default=None,
+        description=(
+            "As of decision date, in raw native currency (KRW won for KR, USD "
+            "for US) — same unit as the quarterly aggregate fields."
+        ),
     )
     last_close_price: float | None = Field(
         default=None, description="Closing price at decision date",
