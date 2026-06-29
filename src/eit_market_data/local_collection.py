@@ -25,6 +25,7 @@ from eit_market_data.kr.dart_provider import (
     DartProvider,
     _DART_CACHE_DIR,
     _DART_CACHE_SIZE_LIMIT,
+    _extract_sections,
 )
 from eit_market_data.kr.ecos_provider import EcosMacroProvider
 from eit_market_data.kr.fundamental_provider import CompositeKrFundamentalProvider
@@ -142,6 +143,20 @@ class KrCollectionState:
         self.news_coverage.update(payload.news_coverage)
 
 
+def _filing_richness(filing: FilingData) -> int:
+    """Rank how complete a cached filing copy is (more populated sections win)."""
+    return sum(
+        1
+        for value in (
+            filing.business_overview,
+            filing.risks,
+            filing.mda,
+            filing.governance,
+        )
+        if value
+    )
+
+
 class CacheOnlyDartProvider:
     """DART provider backed only by the local disk cache.
 
@@ -224,20 +239,127 @@ class CacheOnlyDartProvider:
     async def fetch_filing(self, ticker: str, as_of: date) -> FilingData:
         norm_ticker = normalize_ticker(ticker)
         # Point-in-time guard: never return a filing whose filing_date is unknown
-        # or after as_of. Scan all cached buckets and pick the most recent filing
-        # that was actually filed on or before as_of.
-        best: FilingData | None = None
+        # or after as_of. Gather every distinct annual filing visible at as_of,
+        # newest-first, and build the trailing history (current + up to 2 prior).
+        by_date: dict[date, FilingData] = {}
         for cached in self._iter_cached("filing", norm_ticker):
             if not isinstance(cached, FilingData):
                 continue
             filing_date = cached.filing_date
-            if not is_visible(filing_date, as_of):
+            if filing_date is None or not is_visible(filing_date, as_of):
                 continue
-            if best is None or best.filing_date is None or filing_date > best.filing_date:
-                best = cached
-        if best is not None:
-            return best
-        return FilingData(ticker=norm_ticker)
+            # A given filing_date can appear in several collection-month buckets;
+            # keep the richest copy (prefer one with business_overview, then risks).
+            existing = by_date.get(filing_date)
+            if existing is None or _filing_richness(cached) > _filing_richness(existing):
+                by_date[filing_date] = cached
+
+        if not by_date:
+            return FilingData(ticker=norm_ticker)
+
+        ordered = [by_date[d] for d in sorted(by_date, reverse=True)][:3]
+
+        history: list[FilingData] = []
+        for entry in ordered:
+            risks = entry.risks
+            if not risks and entry.filing_date is not None:
+                # Re-extract risks from the cached raw document on the fly; older
+                # 사업보고서 were parsed before the risk-section patterns existed.
+                risks = self._reextract_risks(norm_ticker, entry.filing_date)
+            history.append(
+                FilingData(
+                    ticker=norm_ticker,
+                    filing_date=entry.filing_date,
+                    filing_type=entry.filing_type,
+                    business_overview=entry.business_overview,
+                    risks=risks,
+                    mda=entry.mda,
+                    governance=entry.governance,
+                    fiscal_year=self._fiscal_year_for(norm_ticker, entry.filing_date),
+                )
+            )
+
+        top = history[0]
+        return FilingData(
+            ticker=norm_ticker,
+            filing_date=top.filing_date,
+            filing_type=top.filing_type,
+            business_overview=top.business_overview,
+            risks=top.risks,
+            mda=top.mda,
+            governance=top.governance,
+            fiscal_year=top.fiscal_year,
+            history=history,
+        )
+
+    def _report_index(self, ticker: str) -> dict[str, tuple[str, str]]:
+        """Map ``rcept_dt (YYYYMMDD) -> (rcept_no, report_nm)`` for this ticker's
+        annual reports, from cached ``reports:<corp>:<ym>`` frames.
+
+        Built lazily once per process and cached per ticker. Enables offline
+        mapping from a cached filing's ``filing_date`` back to its raw
+        ``doc:<rcept_no>`` text for risk re-extraction.
+        """
+        cache = getattr(self, "_report_index_cache", None)
+        if cache is None:
+            cache = {}
+            self._report_index_cache = cache
+        if ticker in cache:
+            return cache[ticker]
+
+        index: dict[str, tuple[str, str]] = {}
+        if self._cache is not None:
+            for key in self._cache.iterkeys():
+                text = str(key)
+                if not text.startswith("reports:"):
+                    continue
+                frame = self._cache.get(text)
+                if frame is None or not hasattr(frame, "columns"):
+                    continue
+                cols = set(frame.columns)
+                if not {"stock_code", "rcept_dt", "rcept_no", "report_nm"} <= cols:
+                    continue
+                try:
+                    for _, row in frame.iterrows():
+                        if normalize_ticker(str(row.get("stock_code", ""))) != ticker:
+                            continue
+                        report_nm = str(row.get("report_nm", ""))
+                        if "사업보고서" not in report_nm:
+                            continue
+                        rcept_dt = str(row.get("rcept_dt", "")).strip()
+                        rcept_no = str(row.get("rcept_no", "")).strip()
+                        if rcept_dt and rcept_no:
+                            index[rcept_dt] = (rcept_no, report_nm)
+                except Exception:  # pragma: no cover - defensive over cached frames
+                    continue
+        cache[ticker] = index
+        return index
+
+    def _reextract_risks(self, ticker: str, filing_date: date) -> str | None:
+        if self._cache is None:
+            return None
+        entry = self._report_index(ticker).get(filing_date.strftime("%Y%m%d"))
+        if entry is None:
+            return None
+        rcept_no = entry[0]
+        doc = self._cache.get(f"doc:{rcept_no}")
+        if doc is None:
+            return None
+        text = doc.decode("utf-8", errors="ignore") if isinstance(doc, bytes) else str(doc)
+        try:
+            sections = _extract_sections(text)
+        except Exception:
+            return None
+        return sections.get("risks")
+
+    def _fiscal_year_for(self, ticker: str, filing_date: date) -> int | None:
+        entry = self._report_index(ticker).get(filing_date.strftime("%Y%m%d"))
+        if entry is not None:
+            m = re.search(r"\((\d{4})", entry[1])
+            if m:
+                return int(m.group(1))
+        # Annual report is filed in the year after the fiscal year it reports on.
+        return filing_date.year - 1
 
     async def fetch_issued_shares(self, ticker: str, as_of: date) -> float | None:
         cached = self._lookup("issued_shares", normalize_ticker(ticker), as_of)

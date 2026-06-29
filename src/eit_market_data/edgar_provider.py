@@ -103,17 +103,24 @@ async def _ticker_to_cik(client, ticker: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-async def _find_10k_url(
-    client, cik: str, as_of: date
-) -> tuple[str | None, date | None]:
-    """Find the most recent 10-K filing URL filed on or before as_of."""
+async def _find_10k_filings(
+    client, cik: str, as_of: date, limit: int = 3
+) -> list[tuple[str, date, str, int | None]]:
+    """Find up to ``limit`` most-recent distinct 10-K filings on/before as_of.
+
+    Returns a newest-first list of ``(doc_url, filing_date, accession, fiscal_year)``.
+    PIT: never includes a 10-K with ``filingDate`` after ``as_of``. ``10-K/A``
+    amendments for an already-seen fiscal year are skipped so each entry is a
+    distinct annual filing.
+    """
     url = f"https://data.sec.gov/submissions/CIK{cik}.json"
     text = await _rate_limited_get(client, url)
     if not text:
-        return None, None
+        return []
 
     import json
 
+    results: list[tuple[str, date, str, int | None]] = []
     try:
         data = json.loads(text)
         recent = data.get("filings", {}).get("recent", {})
@@ -121,7 +128,9 @@ async def _find_10k_url(
         dates = recent.get("filingDate", [])
         accessions = recent.get("accessionNumber", [])
         primary_docs = recent.get("primaryDocument", [])
+        report_dates = recent.get("reportDate", [])
 
+        seen_years: set[int] = set()
         for i, form in enumerate(forms):
             if form not in ("10-K", "10-K/A"):
                 continue
@@ -129,19 +138,35 @@ async def _find_10k_url(
             if filing_date > as_of:
                 continue
 
-            # Build document URL
+            fiscal_year: int | None = None
+            if i < len(report_dates) and report_dates[i]:
+                try:
+                    fiscal_year = date.fromisoformat(report_dates[i]).year
+                except ValueError:
+                    fiscal_year = None
+            if fiscal_year is None:
+                fiscal_year = filing_date.year - 1
+
+            # One entry per distinct fiscal year (skip /A amendments of a year
+            # already captured by a later-iterated original, newest-first order).
+            if fiscal_year in seen_years:
+                continue
+            seen_years.add(fiscal_year)
+
             acc = accessions[i].replace("-", "")
             doc = primary_docs[i]
             doc_url = (
                 f"https://www.sec.gov/Archives/edgar/data/"
                 f"{cik.lstrip('0')}/{acc}/{doc}"
             )
-            return doc_url, filing_date
+            results.append((doc_url, filing_date, accessions[i], fiscal_year))
+            if len(results) >= limit:
+                break
 
     except Exception as e:
         logger.warning("Failed to parse filing index for CIK %s: %s", cik, e)
 
-    return None, None
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +259,28 @@ def _extract_sections(html_text: str, max_chars: int = 8000) -> dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
+# Per-accession section cache
+# ---------------------------------------------------------------------------
+
+# 10-K text/sections never change after filing, so cache the extracted sections
+# keyed by accession to avoid re-downloading the same document across months and
+# tickers during the trailing-history backfill.
+_ACCESSION_SECTION_CACHE: dict[str, dict[str, str]] = {}
+
+
+async def _sections_for_accession(client, accession: str, doc_url: str) -> dict[str, str]:
+    """Download (once) and extract sections for a given accession."""
+    if accession in _ACCESSION_SECTION_CACHE:
+        return _ACCESSION_SECTION_CACHE[accession]
+    html_text = await _rate_limited_get(client, doc_url)
+    if not html_text:
+        return {}
+    sections = _extract_sections(html_text)
+    _ACCESSION_SECTION_CACHE[accession] = sections
+    return sections
+
+
+# ---------------------------------------------------------------------------
 # Provider class
 # ---------------------------------------------------------------------------
 
@@ -268,26 +315,39 @@ class EdgarFilingProvider:
                 logger.info("No CIK found for %s", ticker)
                 return FilingData(ticker=ticker)
 
-            # Step 2: find 10-K URL
-            doc_url, filing_date = await _find_10k_url(client, cik, as_of)
-            if not doc_url:
+            # Step 2: find up to 3 most-recent distinct 10-Ks (newest-first, PIT)
+            filings = await _find_10k_filings(client, cik, as_of, limit=3)
+            if not filings:
                 logger.info("No 10-K found for %s before %s", ticker, as_of)
                 return FilingData(ticker=ticker)
 
-            # Step 3: download filing document
-            html_text = await _rate_limited_get(client, doc_url)
-            if not html_text:
-                return FilingData(ticker=ticker, filing_date=filing_date)
+            # Step 3: build a history entry per filing (sections cached by accession)
+            history: list[FilingData] = []
+            for doc_url, filing_date, accession, fiscal_year in filings:
+                sections = await _sections_for_accession(client, accession, doc_url)
+                history.append(
+                    FilingData(
+                        ticker=ticker,
+                        filing_date=filing_date,
+                        filing_type="10-K",
+                        business_overview=sections.get("business_overview"),
+                        risks=sections.get("risks"),
+                        mda=sections.get("mda"),
+                        governance=sections.get("governance"),
+                        fiscal_year=fiscal_year,
+                    )
+                )
 
-            # Step 4: extract sections
-            sections = _extract_sections(html_text)
-
+            # Step 4: top-level fields mirror history[0] (most recent filing)
+            top = history[0]
             return FilingData(
                 ticker=ticker,
-                filing_date=filing_date,
-                filing_type="10-K",
-                business_overview=sections.get("business_overview"),
-                risks=sections.get("risks"),
-                mda=sections.get("mda"),
-                governance=sections.get("governance"),
+                filing_date=top.filing_date,
+                filing_type=top.filing_type,
+                business_overview=top.business_overview,
+                risks=top.risks,
+                mda=top.mda,
+                governance=top.governance,
+                fiscal_year=top.fiscal_year,
+                history=history,
             )

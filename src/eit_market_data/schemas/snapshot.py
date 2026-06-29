@@ -129,7 +129,16 @@ class FundamentalData(BaseModel):
 # ---------------------------------------------------------------------------
 
 class FilingData(BaseModel):
-    """Extracted text sections from the most recent filing (10-K/10-Q or equivalent)."""
+    """Extracted text sections from the most recent filing (10-K/10-Q or equivalent).
+
+    Backward-compatible "trailing annual filing history" extension (Option A):
+    the single top-level fields below always describe the most-recent filing and
+    are mirrored by ``history[0]`` when ``history`` is populated. ``history`` is a
+    newest-first list of the current plus up to two prior annual filings. Each
+    ``history`` entry is itself a :class:`FilingData` but carries an empty nested
+    ``history`` to avoid unbounded recursion. Existing consumers that read the
+    single top-level fields (e.g. ``filing.risks``) are unaffected.
+    """
 
     ticker: str
     filing_date: date | None = None
@@ -138,6 +147,18 @@ class FilingData(BaseModel):
     risks: str | None = None
     mda: str | None = Field(default=None, description="Management Discussion & Analysis")
     governance: str | None = None
+    fiscal_year: int | None = Field(
+        default=None,
+        description="Fiscal year the filing reports on (history entries); None for the legacy single record",
+    )
+    history: list[FilingData] = Field(
+        default_factory=list,
+        description="Newest-first trailing annual filings (current + up to 2 prior); history[0] == top-level fields",
+    )
+
+
+# Resolve the self-referential ``history`` forward reference (PEP 563 strings).
+FilingData.model_rebuild()
 
 
 # ---------------------------------------------------------------------------

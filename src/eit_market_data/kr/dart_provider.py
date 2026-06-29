@@ -59,6 +59,9 @@ _SECTION_PATTERNS: dict[str, list[str]] = {
     "risks": [
         r"위험\s*요소",
         r"리스크\s*요인",
+        r"투자\s*위험\s*요소",
+        r"위험관리\s*및\s*파생거래",
+        r"재무위험관리정책",
     ],
     "mda": [
         r"재무상태\s*및\s*영업실적",
@@ -174,35 +177,81 @@ def _clean_document_text(raw: str) -> str:
     return text.strip()
 
 
-def _extract_sections(doc_text: str, max_chars: int = 8000) -> dict[str, str]:
+def _is_toc_chunk(chunk: str) -> bool:
+    """Heuristic: a table-of-contents entry, not a real section body.
+
+    DART 사업보고서 ToC lines use dotted/dashed page leaders (``------ 39``)
+    near the start of the chunk, whereas a real section body opens with prose.
+    """
+    head = chunk[:400]
+    return bool(re.search(r"-{5,}", head)) or bool(re.search(r"\.{5,}", head))
+
+
+def _extract_sections(
+    doc_text: str, max_chars: int = 8000, min_body: int = 60
+) -> dict[str, str]:
+    """Extract 사업보고서 sections, skipping table-of-contents header hits.
+
+    Every section header (across all section patterns) is collected as a
+    boundary. For each section we iterate its header matches newest-found-first
+    and pick the first whose following body is substantial (``>= min_body``) and
+    is not a ToC stub. The body runs from the chosen header to the next header of
+    *any other* section (capped at ``max_chars``). This lets the risk section be
+    recovered from older reports where the only risk discussion lives under a
+    deep ``5. 위험관리 및 파생거래`` heading that follows a ToC entry of the same name.
+    """
     plain = _clean_document_text(doc_text)
-    matches: list[tuple[int, int, str]] = []
 
+    # Collect header start positions per section.
+    section_matches: dict[str, list[re.Match[str]]] = {}
     for section_name, patterns in _SECTION_PATTERNS.items():
-        best_match: re.Match[str] | None = None
+        found: list[re.Match[str]] = []
         for pattern in patterns:
-            m = re.search(pattern, plain, flags=re.IGNORECASE)
-            if m and (best_match is None or m.start() < best_match.start()):
-                best_match = m
-        if best_match is not None:
-            matches.append((best_match.start(), best_match.end(), section_name))
+            found.extend(re.finditer(pattern, plain, flags=re.IGNORECASE))
+        found.sort(key=lambda m: m.start())
+        section_matches[section_name] = found
 
-    if not matches:
-        return {}
-
-    matches.sort(key=lambda item: item[0])
     extracted: dict[str, str] = {}
-    for i, (_start, section_start, section_name) in enumerate(matches):
-        next_start = matches[i + 1][0] if i + 1 < len(matches) else min(
-            len(plain), section_start + max_chars
+    for section_name, matches in section_matches.items():
+        # Boundaries are headers of *other* sections only, so dense repeats of a
+        # section's own keyword (e.g. multiple 재무위험관리정책 hits) don't truncate it.
+        other_starts = sorted(
+            m.start()
+            for name, ms in section_matches.items()
+            if name != section_name
+            for m in ms
         )
-        chunk = plain[section_start:next_start].strip()
-        if len(chunk) > max_chars:
-            chunk = chunk[:max_chars]
-        if len(chunk) > 60:
-            extracted[section_name] = chunk
+        for m in matches:
+            body_start = m.end()
+            end = len(plain)
+            for s in other_starts:
+                if s >= body_start:
+                    end = s
+                    break
+            if end <= body_start:
+                end = min(body_start + max_chars, len(plain))
+            chunk = plain[body_start:end].strip()
+            if len(chunk) > max_chars:
+                chunk = chunk[:max_chars]
+            if len(chunk) >= min_body and not _is_toc_chunk(chunk):
+                extracted[section_name] = chunk
+                break
 
     return extracted
+
+
+def _fiscal_year_from_report_nm(report_nm: str, filing_date: date | None) -> int | None:
+    """Derive the reported fiscal year from a report name like ``사업보고서 (2023.12)``.
+
+    Falls back to ``filing_date.year - 1`` (annual reports are filed the year
+    after the fiscal year they cover).
+    """
+    m = re.search(r"\((\d{4})", report_nm or "")
+    if m:
+        return int(m.group(1))
+    if filing_date is not None:
+        return filing_date.year - 1
+    return None
 
 
 def _parse_share_count(raw: str) -> float | None:
@@ -975,12 +1024,22 @@ class DartProvider:
             return FilingData(ticker=ticker)
 
         fallback_date: date | None = None
+        history: list[FilingData] = []
+        seen_years: set[int] = set()
         for _, report in reports.iterrows():
+            if len(history) >= 3:
+                break
             rcept_no = str(report.get("rcept_no", "")).strip()
             filing_date = _parse_date_yyyymmdd(report.get("rcept_dt"))
+            fiscal_year = _fiscal_year_from_report_nm(
+                str(report.get("report_nm", "")), filing_date
+            )
             if fallback_date is None:
                 fallback_date = filing_date
             if not rcept_no:
+                continue
+            # One entry per distinct fiscal year (skip 정정/[첨부] duplicates).
+            if fiscal_year is not None and fiscal_year in seen_years:
                 continue
 
             try:
@@ -996,13 +1055,32 @@ class DartProvider:
                 continue
             if not sections.get("business_overview"):
                 continue
+            if fiscal_year is not None:
+                seen_years.add(fiscal_year)
+            history.append(
+                FilingData(
+                    ticker=ticker,
+                    filing_date=filing_date,
+                    filing_type="사업보고서",
+                    business_overview=sections.get("business_overview"),
+                    risks=sections.get("risks"),
+                    mda=sections.get("mda"),
+                    fiscal_year=fiscal_year,
+                )
+            )
+
+        if history:
+            top = history[0]
             return FilingData(
                 ticker=ticker,
-                filing_date=filing_date,
-                filing_type="사업보고서",
-                business_overview=sections.get("business_overview"),
-                risks=sections.get("risks"),
-                mda=sections.get("mda"),
+                filing_date=top.filing_date,
+                filing_type=top.filing_type,
+                business_overview=top.business_overview,
+                risks=top.risks,
+                mda=top.mda,
+                governance=top.governance,
+                fiscal_year=top.fiscal_year,
+                history=history,
             )
 
         return FilingData(
