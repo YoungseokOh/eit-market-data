@@ -6,6 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
+import pytest
 from helpers import FakeCache
 
 from eit_market_data.kr.news_catalog import KrNewsWindowCoverage
@@ -79,22 +80,22 @@ def test_build_run_root_is_stable() -> None:
     assert str(path) == "/tmp/storage/runs/2026-03-31/both_all_top300"
 
 
-def test_next_kr_execution_date_uses_krx_business_day(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "eit_market_data.local_collection._krx_business_days_between",
-        lambda start, end: [date(2026, 5, 7), date(2026, 5, 8)],
-    )
-
-    assert _next_kr_execution_date(date(2026, 5, 4)) == date(2026, 5, 7)
-
-
-def test_next_kr_execution_date_falls_back_to_next_weekday(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "eit_market_data.local_collection._krx_business_days_between",
-        lambda start, end: [],
-    )
-
+def test_next_kr_execution_date_skips_weekend() -> None:
+    # Friday 2026-05-08 -> next trading day is Monday 2026-05-11.
     assert _next_kr_execution_date(date(2026, 5, 8)) == date(2026, 5, 11)
+
+
+def test_next_kr_execution_date_is_xkrx_holiday_aware() -> None:
+    # Month-end decision dates whose naive next-weekday lands on a KRX holiday
+    # must skip to the genuine next trading day.
+    # 2024-12-30 -> 2024-12-31 is the year-end closure -> 2025-01-02.
+    assert _next_kr_execution_date(date(2024, 12, 30)) == date(2025, 1, 2)
+    # 2023-12-28 -> 2023-12-29 closure + New Year -> 2024-01-02.
+    assert _next_kr_execution_date(date(2023, 12, 28)) == date(2024, 1, 2)
+    # 2024-09-30 -> 2024-10-01 개천절 -> 2024-10-02.
+    assert _next_kr_execution_date(date(2024, 9, 30)) == date(2024, 10, 2)
+    # 2023-09-27 -> 추석 연휴(09-28,09-29) + 개천절(10-02,10-03) -> 2023-10-04.
+    assert _next_kr_execution_date(date(2023, 9, 27)) == date(2023, 10, 4)
 
 
 def test_run_kr_phase_uses_official_pykrx_raw_crawler(monkeypatch, tmp_path: Path) -> None:
@@ -547,8 +548,11 @@ def test_build_local_universe_manifest_kospi200_falls_back_to_naver_current(
     )
 
     output_path = tmp_path / "kospi200.csv"
+    # The Naver *current* membership fallback is only PIT-safe for the current
+    # month (it is stamped with date.today()); a historical as_of must never use
+    # it. Exercise the fallback with a current-month as_of.
     build_local_universe_manifest(
-        as_of=date(2025, 12, 31),
+        as_of=date.today(),
         kind="kospi200",
         output_path=output_path,
     )
@@ -558,6 +562,67 @@ def test_build_local_universe_manifest_kospi200_falls_back_to_naver_current(
     assert frame.loc[0, "ticker"] == "0126Z0"
     assert frame.loc[0, "name"] == "삼성에피스홀딩스"
     assert frame["source"].unique().tolist() == ["naver_current_fallback"]
+
+
+def test_build_local_universe_manifest_kospi200_historical_no_prev_refuses_naver(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        "eit_market_data.local_collection._listing_metadata_frame",
+        lambda: pd.DataFrame(columns=["ticker", "name", "market", "sector"]),
+    )
+    monkeypatch.setattr(
+        "eit_market_data.local_collection._fetch_kospi200_tickers_from_pykrx",
+        lambda as_of: [],
+    )
+    monkeypatch.setattr(
+        "eit_market_data.local_collection._fetch_kospi200_rows_from_naver_current",
+        lambda: [{"ticker": f"{idx:06d}", "name": f"name-{idx}"} for idx in range(1, 201)],
+    )
+
+    # Historical month with an empty pykrx list and no previous membership: refuse
+    # the today()-stamped Naver fallback rather than backfill past with present.
+    with pytest.raises(RuntimeError, match="look-ahead"):
+        build_local_universe_manifest(
+            as_of=date(2024, 9, 30),
+            kind="kospi200",
+            output_path=tmp_path / "kospi200.csv",
+        )
+
+
+def test_build_local_universe_manifest_kospi200_offcycle_churn_carries_forward(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    base = [f"{idx:06d}" for idx in range(1, 201)]
+    monkeypatch.setattr(
+        "eit_market_data.local_collection._listing_metadata_frame",
+        lambda: pd.DataFrame(columns=["ticker", "name", "market", "sector"]),
+    )
+    monkeypatch.setattr(
+        "eit_market_data.local_collection.fetch_market_cap_frame",
+        lambda as_of, market: pd.DataFrame(columns=["종목코드", "시가총액"]),
+    )
+    # Off-cycle (September) pykrx list swaps 19 names vs the prior month.
+    suspect = base[:181] + [f"9{idx:05d}" for idx in range(19)]
+    monkeypatch.setattr(
+        "eit_market_data.local_collection._fetch_kospi200_tickers_from_pykrx",
+        lambda as_of: suspect,
+    )
+    previous_members = [{"ticker": t, "name": f"name-{t}"} for t in base]
+
+    output_path = tmp_path / "kospi200.csv"
+    build_local_universe_manifest(
+        as_of=date(2024, 9, 30),
+        kind="kospi200",
+        output_path=output_path,
+        previous_members=previous_members,
+    )
+
+    frame = pd.read_csv(output_path, dtype={"ticker": str})
+    assert set(frame["ticker"]) == set(base)
+    assert frame["source"].unique().tolist() == ["carry_forward_offcycle"]
 
 
 def _cache_only_provider(data: dict[str, object]) -> local_collection.CacheOnlyDartProvider:

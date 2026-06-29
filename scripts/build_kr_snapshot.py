@@ -79,6 +79,7 @@ async def build_snapshot(
         tickers,
         SnapshotConfig(artifacts_dir=str(effective_root)),
         decision_date=as_of,
+        market="XKRX",
     )
 
     snapshot_dir = effective_root / "snapshots" / month

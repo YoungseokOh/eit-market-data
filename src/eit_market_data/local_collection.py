@@ -12,10 +12,8 @@ import shutil
 import subprocess
 import sys
 import time
-from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta, timezone
-from io import StringIO
 from pathlib import Path
 from typing import Any
 
@@ -60,58 +58,32 @@ DEFAULT_US_UNIVERSE = "AAPL,MSFT,GOOGL,AMZN,NVDA"
 CURRENT_KR_UNIVERSE_CSV = PROJECT_ROOT / "universes" / "kr_universe.csv"
 NEWS_LOOKBACK_DAYS = 30
 KOSPI200_INDEX_CODE = "1028"
+# KOSPI200 reconstitutes on a fixed semi-annual cycle (effective the trading day
+# after the second Thursday of June and December). Any month outside this set is
+# "off-cycle" and should see at most a couple of names change (delistings/M&A).
+KOSPI200_REVIEW_MONTHS = frozenset({6, 12})
+# Maximum month-over-month membership churn (max of entrants vs leavers) we trust
+# from the raw pykrx deposit-file list in an off-cycle month. A spurious transient
+# list (or a today()-stamped current-membership fallback applied to a historical
+# month) shows up as a large round-trip; legitimate off-cycle changes do not.
+KOSPI200_OFFCYCLE_CHURN_THRESHOLD = 10
 
 logger = logging.getLogger(__name__)
 
 
-def _next_weekday(value: date) -> date:
-    """Return the next weekday after ``value``."""
-    candidate = value + timedelta(days=1)
-    while candidate.weekday() >= 5:
-        candidate += timedelta(days=1)
-    return candidate
-
-
-def _krx_business_days_between(start: date, end: date) -> list[date]:
-    """Return KRX business days for a bounded range when pykrx can provide them."""
-    try:
-        from eit_market_data.kr.krx_auth import (
-            ensure_krx_authenticated_session,
-            install_pykrx_krx_session_hooks,
-        )
-        from eit_market_data.kr.pykrx_loader import load_pykrx_stock
-
-        stock = load_pykrx_stock()
-        install_pykrx_krx_session_hooks()
-        ensure_krx_authenticated_session(interactive=False)
-        with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
-            days = stock.get_previous_business_days(
-                fromdate=start.strftime("%Y%m%d"),
-                todate=end.strftime("%Y%m%d"),
-            )
-    except Exception as exc:
-        logger.warning("KRX business-day lookup failed for %s..%s: %s", start, end, exc)
-        return []
-
-    parsed: list[date] = []
-    for item in days:
-        day = item.date() if hasattr(item, "date") else item
-        if isinstance(day, date):
-            parsed.append(day)
-    return sorted(day for day in parsed if start <= day <= end)
-
-
 def _next_kr_execution_date(as_of: date) -> date:
-    """Return the next known KRX trading day, falling back to next weekday.
+    """Return the next KRX (XKRX) trading day strictly after ``as_of``.
 
-    pykrx exposes historical/known business days, but it may not return future
-    exchange holidays. For current-day partial bundles, use KRX if available and
-    otherwise avoid the old month-end placeholder by falling back to next weekday.
+    Uses the curated, holiday-aware exchange calendar in
+    :mod:`eit_market_data.core.calendar` so that ``execution_date`` never lands
+    on a market holiday (Seollal/Chuseok, year-end closure, substitute
+    holidays, etc.). This replaces the previous brittle live-pykrx business-day
+    lookup that fell back to a weekend-only calendar and produced non-trading
+    execution dates (e.g. 2024-12-31, 2024-10-01 개천절, 2023-09-28 추석).
     """
-    start = as_of + timedelta(days=1)
-    end = as_of + timedelta(days=14)
-    days = _krx_business_days_between(start, end)
-    return days[0] if days else _next_weekday(as_of)
+    from eit_market_data.core.calendar import _next_business_day
+
+    return _next_business_day(as_of, "XKRX")
 
 
 class ValidationError(RuntimeError):
@@ -540,25 +512,126 @@ def _fetch_kospi200_rows_from_naver_current() -> list[dict[str, str]]:
     return deduped
 
 
-def _build_kospi200_records(as_of: date, meta: Any) -> Any:
+def _is_current_or_future_month(as_of: date, *, today: date | None = None) -> bool:
+    """True when ``as_of`` falls in the current calendar month (or later).
+
+    Only a current-month ``as_of`` may use a ``date.today()``-stamped live source
+    (Naver current membership). For a historical month that snapshot would stamp
+    present-day membership onto the past — a look-ahead defect — so it is banned.
+    """
+    today = today or date.today()
+    return (as_of.year, as_of.month) >= (today.year, today.month)
+
+
+def _kospi200_membership_churn(
+    previous: set[str], current: set[str]
+) -> tuple[int, set[str], set[str]]:
+    """Return ``(churn, entrants, leavers)`` for two membership sets.
+
+    ``churn`` is ``max(len(entrants), len(leavers))`` — the count of names that
+    changed in the larger direction. A clean swap of N names yields churn N.
+    """
+    entrants = current - previous
+    leavers = previous - current
+    return max(len(entrants), len(leavers)), entrants, leavers
+
+
+def _carry_forward_rows(previous_members: list[dict[str, str]]) -> list[dict[str, str]]:
+    return [
+        {"ticker": normalize_ticker(row["ticker"]), "source_name": row.get("name", "")}
+        for row in previous_members
+        if str(row.get("ticker", "")).strip()
+    ]
+
+
+def _build_kospi200_records(
+    as_of: date,
+    meta: Any,
+    *,
+    previous_members: list[dict[str, str]] | None = None,
+) -> Any:
+    """Build the KOSPI200 membership records for ``as_of``.
+
+    PIT-safe membership resolution:
+
+    * The raw pykrx deposit-file list is the primary source.
+    * Off-cycle guard: KOSPI200 only reconstitutes in June/December. In any other
+      month, if the pykrx list churns more than ``KOSPI200_OFFCYCLE_CHURN_THRESHOLD``
+      names versus the previous month's persisted membership, the list is treated
+      as suspect (transient pykrx response or a stale current-membership snapshot)
+      and the previous month's membership is carried forward.
+    * Fallbacks when pykrx does not return a clean 200-name list: carry the
+      previous month forward when available; otherwise use the Naver *current*
+      membership ONLY for a current/future ``as_of`` (never for a historical
+      month, which would stamp today's membership onto the past).
+    """
     import pandas as pd
+
+    previous_rows = _carry_forward_rows(previous_members or [])
+    previous_set = {row["ticker"] for row in previous_rows}
 
     source = "krx_pykrx"
     source_as_of = as_of.isoformat()
-    rows = [{"ticker": ticker, "source_name": ""} for ticker in _fetch_kospi200_tickers_from_pykrx(as_of)]
+    pykrx_tickers = _fetch_kospi200_tickers_from_pykrx(as_of)
+    rows = [{"ticker": ticker, "source_name": ""} for ticker in pykrx_tickers]
 
-    if len(rows) != 200:
-        logger.warning(
-            "KOSPI200 official pykrx source returned %d rows for %s; using Naver current fallback.",
-            len(rows),
-            as_of,
-        )
-        source = "naver_current_fallback"
-        source_as_of = date.today().isoformat()
-        rows = [
-            {"ticker": row["ticker"], "source_name": row.get("name", "")}
-            for row in _fetch_kospi200_rows_from_naver_current()
-        ]
+    pykrx_ok = len(rows) == 200
+
+    # Off-cycle churn guard: only applies when we have a clean pykrx list AND a
+    # previous month to compare against. June/December reviews are never blocked.
+    if (
+        pykrx_ok
+        and previous_set
+        and as_of.month not in KOSPI200_REVIEW_MONTHS
+    ):
+        current_set = {row["ticker"] for row in rows}
+        churn, entrants, leavers = _kospi200_membership_churn(previous_set, current_set)
+        if churn > KOSPI200_OFFCYCLE_CHURN_THRESHOLD:
+            logger.warning(
+                "KOSPI200 off-cycle churn for %s is %d names (>%d) in a non-review "
+                "month (entrants=%d, leavers=%d); carrying forward previous membership.",
+                as_of,
+                churn,
+                KOSPI200_OFFCYCLE_CHURN_THRESHOLD,
+                len(entrants),
+                len(leavers),
+            )
+            rows = list(previous_rows)
+            source = "carry_forward_offcycle"
+            source_as_of = as_of.isoformat()
+            pykrx_ok = True
+
+    if not pykrx_ok:
+        if previous_rows:
+            logger.warning(
+                "KOSPI200 pykrx source returned %d rows for %s; carrying forward "
+                "previous month's membership (%d names).",
+                len(rows),
+                as_of,
+                len(previous_rows),
+            )
+            rows = list(previous_rows)
+            source = "carry_forward_prev_month"
+            source_as_of = as_of.isoformat()
+        elif _is_current_or_future_month(as_of):
+            logger.warning(
+                "KOSPI200 official pykrx source returned %d rows for %s; using Naver "
+                "current fallback (current month).",
+                len(rows),
+                as_of,
+            )
+            source = "naver_current_fallback"
+            source_as_of = date.today().isoformat()
+            rows = [
+                {"ticker": row["ticker"], "source_name": row.get("name", "")}
+                for row in _fetch_kospi200_rows_from_naver_current()
+            ]
+        else:
+            raise RuntimeError(
+                f"KOSPI200 universe source returned {len(rows)} rows for historical "
+                f"{as_of}; refusing Naver current fallback (look-ahead) and no previous "
+                "membership available to carry forward."
+            )
 
     if len(rows) != 200:
         raise RuntimeError(f"KOSPI200 universe source returned {len(rows)} rows; expected 200.")
@@ -584,11 +657,84 @@ def _build_kospi200_records(as_of: date, meta: Any) -> Any:
     return records
 
 
+def _load_kospi200_members_from_csv(path: Path) -> list[dict[str, str]]:
+    """Load persisted KOSPI200 membership rows (ticker + name) from a CSV."""
+    import pandas as pd
+
+    try:
+        frame = pd.read_csv(path, dtype={"ticker": str})
+    except Exception as exc:
+        logger.warning("Failed to read previous KOSPI200 universe %s: %s", path, exc)
+        return []
+    if frame is None or frame.empty or "ticker" not in frame.columns:
+        return []
+    name_col = "name" if "name" in frame.columns else None
+    rows: list[dict[str, str]] = []
+    for _, row in frame.iterrows():
+        ticker = str(row["ticker"]).strip()
+        if not ticker:
+            continue
+        rows.append(
+            {
+                "ticker": normalize_ticker(ticker),
+                "name": str(row[name_col]).strip() if name_col else "",
+            }
+        )
+    return rows
+
+
+def find_previous_kospi200_members(
+    *,
+    storage_root: Path,
+    as_of: date,
+    market: str,
+    phase: str,
+    kind: str,
+) -> list[dict[str, str]]:
+    """Locate the most recent prior-month persisted KOSPI200 membership.
+
+    Scans ``storage_root/runs/<run-date>/<label>/universes/kr/<kind>/<prev-month>.csv``
+    for the calendar month immediately preceding ``as_of``. PIT-safe: only run
+    directories dated strictly before ``as_of`` are considered, so no future
+    membership can leak in. Returns ``[]`` when no prior month is available.
+    """
+    if kind.lower() != "kospi200":
+        return []
+    prev_anchor = as_of.replace(day=1) - timedelta(days=1)
+    prev_month = prev_anchor.strftime("%Y-%m")
+    label = f"{market}_{phase}_{kind}"
+    runs_root = storage_root / "runs"
+    if not runs_root.exists():
+        return []
+
+    candidates: list[tuple[str, Path]] = []
+    for run_dir in runs_root.iterdir():
+        if not run_dir.is_dir() or run_dir.name >= as_of.strftime("%Y-%m-%d"):
+            continue  # never look ahead: skip runs dated on/after as_of
+        csv_path = run_dir / label / "universes" / "kr" / kind / f"{prev_month}.csv"
+        if csv_path.exists():
+            candidates.append((run_dir.name, csv_path))
+    if not candidates:
+        return []
+    # Most recent run-date wins (latest correction of the prior month's universe).
+    _, best = max(candidates, key=lambda item: item[0])
+    members = _load_kospi200_members_from_csv(best)
+    if members:
+        logger.info(
+            "KOSPI200 previous-month membership for %s loaded from %s (%d names).",
+            as_of,
+            best,
+            len(members),
+        )
+    return members
+
+
 def build_local_universe_manifest(
     *,
     as_of: date,
     kind: str,
     output_path: Path,
+    previous_members: list[dict[str, str]] | None = None,
 ) -> Path:
     import pandas as pd
 
@@ -596,7 +742,7 @@ def build_local_universe_manifest(
     meta = _listing_metadata_frame()
 
     if kind == "kospi200":
-        records = _build_kospi200_records(as_of, meta)
+        records = _build_kospi200_records(as_of, meta, previous_members=previous_members)
     elif kind != "full":
         if not kind.startswith("top"):
             raise ValueError(f"Unsupported universe kind: {kind}")
@@ -1361,7 +1507,19 @@ def run_local_collection(
         if phase in {"pilot", "all"}:
             copy_pilot_universe(pilot_universe)
         if phase in {"full", "all"}:
-            build_local_universe_manifest(as_of=as_of, kind=full_universe_kind, output_path=full_universe)
+            previous_members = find_previous_kospi200_members(
+                storage_root=storage_root,
+                as_of=as_of,
+                market=market,
+                phase=phase,
+                kind=full_universe_kind,
+            )
+            build_local_universe_manifest(
+                as_of=as_of,
+                kind=full_universe_kind,
+                output_path=full_universe,
+                previous_members=previous_members,
+            )
 
     async def _run_async() -> None:
         if market in {"kr", "both"} and phase in {"pilot", "all"}:
