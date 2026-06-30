@@ -151,6 +151,13 @@ class FilingData(BaseModel):
         default=None,
         description="Fiscal year the filing reports on (history entries); None for the legacy single record",
     )
+    accession: str | None = Field(
+        default=None,
+        description=(
+            "Filing identity for audit/dedup: SEC accession number (US) or DART "
+            "rcept_no (KR). Optional/backward-compatible; None for legacy records."
+        ),
+    )
     history: list[FilingData] = Field(
         default_factory=list,
         description="Newest-first trailing annual filings (current + up to 2 prior); history[0] == top-level fields",

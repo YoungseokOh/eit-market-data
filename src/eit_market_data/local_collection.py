@@ -26,6 +26,7 @@ from eit_market_data.kr.dart_provider import (
     _DART_CACHE_DIR,
     _DART_CACHE_SIZE_LIMIT,
     _extract_sections,
+    _looks_like_risk_text,
 )
 from eit_market_data.kr.ecos_provider import EcosMacroProvider
 from eit_market_data.kr.fundamental_provider import CompositeKrFundamentalProvider
@@ -257,25 +258,47 @@ class CacheOnlyDartProvider:
         if not by_date:
             return FilingData(ticker=norm_ticker)
 
-        ordered = [by_date[d] for d in sorted(by_date, reverse=True)][:3]
+        # Group by *fiscal year* (parsed from the report period), not filing_date.
+        # A late-filed amendment of an OLD report otherwise slips into the
+        # trailing-3-by-date window and is mislabeled (e.g. Doosan's 2024
+        # [기재정정]사업보고서 (2020.12) → fy=2020), breaking the strictly-descending
+        # fiscal_year invariant. Per year keep the latest-filed (richest) copy.
+        by_year: dict[int, tuple[date, FilingData]] = {}
+        for filing_date, entry in by_date.items():
+            fy = self._fiscal_year_for(norm_ticker, filing_date)
+            if fy is None:
+                continue
+            existing = by_year.get(fy)
+            if existing is None or filing_date > existing[0]:
+                by_year[fy] = (filing_date, entry)
+
+        if not by_year:
+            return FilingData(ticker=norm_ticker)
+
+        ordered_years = sorted(by_year, reverse=True)[:3]
 
         history: list[FilingData] = []
-        for entry in ordered:
+        for fy in ordered_years:
+            filing_date, entry = by_year[fy]
+            # Re-validate stored risks: cached copies from older runs frequently
+            # hold the WRONG text (product marketing, a rating legend). If the
+            # stored value fails the content validator, re-extract from the cached
+            # raw document; the re-extraction is itself validator-gated and yields
+            # valid risk prose or None. "Better empty than wrong".
             risks = entry.risks
-            if not risks and entry.filing_date is not None:
-                # Re-extract risks from the cached raw document on the fly; older
-                # 사업보고서 were parsed before the risk-section patterns existed.
-                risks = self._reextract_risks(norm_ticker, entry.filing_date)
+            if not (risks and _looks_like_risk_text(risks)):
+                risks = self._reextract_risks(norm_ticker, filing_date)
             history.append(
                 FilingData(
                     ticker=norm_ticker,
-                    filing_date=entry.filing_date,
+                    filing_date=filing_date,
                     filing_type=entry.filing_type,
                     business_overview=entry.business_overview,
                     risks=risks,
                     mda=entry.mda,
                     governance=entry.governance,
-                    fiscal_year=self._fiscal_year_for(norm_ticker, entry.filing_date),
+                    fiscal_year=fy,
+                    accession=self._accession_for(norm_ticker, filing_date),
                 )
             )
 
@@ -289,6 +312,7 @@ class CacheOnlyDartProvider:
             mda=top.mda,
             governance=top.governance,
             fiscal_year=top.fiscal_year,
+            accession=top.accession,
             history=history,
         )
 
@@ -360,6 +384,11 @@ class CacheOnlyDartProvider:
                 return int(m.group(1))
         # Annual report is filed in the year after the fiscal year it reports on.
         return filing_date.year - 1
+
+    def _accession_for(self, ticker: str, filing_date: date) -> str | None:
+        """DART rcept_no for this filing (audit/dedup identity), if known."""
+        entry = self._report_index(ticker).get(filing_date.strftime("%Y%m%d"))
+        return entry[0] if entry is not None else None
 
     async def fetch_issued_shares(self, ticker: str, as_of: date) -> float | None:
         cached = self._lookup("issued_shares", normalize_ticker(ticker), as_of)

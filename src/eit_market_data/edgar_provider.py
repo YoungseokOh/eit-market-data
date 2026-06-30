@@ -338,6 +338,74 @@ _FUNC_WORDS = re.compile(
     re.IGNORECASE,
 )
 
+# ---------------------------------------------------------------------------
+# Risk-content validator
+#
+# The boundary scorer (``_body_score``) only verifies that a candidate header
+# is followed by substantive *prose* (not a ToC / running header). It cannot
+# tell whether that prose is genuinely *risk-factor* text. Several 10-K layouts
+# put non-risk prose adjacent to a header that the compact matcher latches onto
+# — e.g. the "Information About Our Executive Officers" bio table (Item 1 tail),
+# the cautionary "forward-looking statements" preamble, or a credit-rating
+# legend. Emitting one of those as ``risks`` creates a false filing-diff signal.
+# This validator decides whether an extracted ``risks`` body is real risk prose;
+# the caller drops it (→ ``None``) when it is not. "Better empty than wrong".
+# ---------------------------------------------------------------------------
+
+_RISK_WORDS_RE = re.compile(
+    r"\b(?:risk|risks|adversely|adverse|could|may|materially|material|"
+    r"uncertaint\w+|harm|harmed|negatively|decline|failure|losses)\b",
+    re.IGNORECASE,
+)
+# Executive-officer bio block (Item 1 tail mis-grabbed as 1A).
+_EXEC_BIO_RE = re.compile(
+    r"information about our executive officers"
+    r"|executive officers of the (?:registrant|company)"
+    r"|provides information regarding our executive officers",
+    re.IGNORECASE,
+)
+# Credit-rating scale tokens (a rating legend, not risk prose).
+_RATING_TOK_RE = re.compile(r"\b(?:AAA|AA\+|BBB|CCC|BB\+)\b")
+
+
+def _looks_like_risk_text(text: str | None) -> bool:
+    """True if ``text`` reads as genuine 10-K/20-F risk-factor prose.
+
+    Rejects executive-officer bios, the forward-looking-statements preamble, a
+    credit-rating legend, and bodies too short or too sparse in risk language to
+    be a real Item 1A. Tuned so known-good Item 1A intros (AVGO/MSFT/HD/PEP/V/
+    QCOM/TSLA/AMD/C/COST/INTC) pass while the known mis-grabs fail.
+    """
+    if not text:
+        return False
+    joined = re.sub(r"\s+", " ", text).strip()
+    if len(joined) < 400:
+        return False
+    head = joined[:600]
+    low = joined.lower()
+    # Executive-officer bio table (Item 1 tail).
+    if _EXEC_BIO_RE.search(head):
+        return False
+    if re.search(r"\bage\b[\s\S]{0,30}\bposition\b", head, re.IGNORECASE):
+        return False
+    if low[:120].startswith("available information") or "available information" in low[:120]:
+        return False
+    # Credit-rating legend (rating tokens clustered with rating vocabulary).
+    if len(_RATING_TOK_RE.findall(joined[:1500])) >= 3 and (
+        "obligor" in low[:2500]
+        or "capacity to" in low[:2500]
+        or "creditworthiness" in low[:2500]
+    ):
+        return False
+    risk_hits = len(_RISK_WORDS_RE.findall(joined[:2500]))
+    # Forward-looking-statements preamble: opens with the cautionary boilerplate
+    # and lacks enumerated-risk density.
+    if "forward-looking statements" in low[:250] and risk_hits < 15:
+        return False
+    if risk_hits < 6:
+        return False
+    return True
+
 
 def _strip_html(raw: str) -> str:
     """Remove HTML tags and decode entities."""
@@ -517,7 +585,15 @@ def _extract_sections(html_text: str, max_chars: int = 8000) -> dict[str, str]:
             # real section start.
             if re.match(r"\d", text):
                 continue
-            ranked.append((tier, start, text[:max_chars]))
+            body = text[:max_chars]
+            # Content validation for the risk section: skip a candidate whose
+            # body is an exec-officer bio, the forward-looking preamble, or a
+            # rating legend (all of which can sit next to a "risk factors"
+            # token). If no candidate passes, ``risks`` is left unset (None) —
+            # an empty section is safer than a wrong one for filing diffs.
+            if section_name == "risks" and not _looks_like_risk_text(body):
+                continue
+            ranked.append((tier, start, body))
 
         if ranked:
             ranked.sort(key=lambda r: (r[0], r[1]))
@@ -664,6 +740,7 @@ class EdgarFilingProvider:
                         mda=sections.get("mda"),
                         governance=sections.get("governance"),
                         fiscal_year=fiscal_year,
+                        accession=accession,
                     )
                 )
 
@@ -678,5 +755,6 @@ class EdgarFilingProvider:
                 mda=top.mda,
                 governance=top.governance,
                 fiscal_year=top.fiscal_year,
+                accession=top.accession,
                 history=history,
             )

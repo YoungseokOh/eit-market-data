@@ -177,6 +177,58 @@ def _clean_document_text(raw: str) -> str:
     return text.strip()
 
 
+# ---------------------------------------------------------------------------
+# Risk-content validator (KR)
+#
+# 사업보고서 has no single guaranteed "투자위험요소" section, so the risk patterns
+# can latch onto non-risk prose that happens to sit near a 위험-keyword: product
+# marketing copy (양산/제품 스펙), a credit-rating legend (등급정의/원리금 채무불이행
+# table), or a cross-reference stub ("...참고하시기 바랍니다"). Emitting any of
+# those as ``risks`` creates a false filing-diff signal. This validator decides
+# whether an extracted body is genuine risk-factor / 재무위험관리 prose; the caller
+# drops it (→ None) otherwise. "Better empty than wrong".
+# ---------------------------------------------------------------------------
+
+_KR_RISK_RE = re.compile(
+    r"위험|악영향|부정적|손실|노출|불확실|하락|감소할|미칠\s*수\s*있|리스크"
+)
+# Credit-rating legend signals (a rating-scale table, not risk prose).
+_KR_RATING_RE = re.compile(
+    r"등급정의|등급의\s*정의|원리금의?\s*(?:상환|채무불이행)|신용평가사|기업어음의?\s*등급"
+)
+# Product-marketing / spec-sheet signals.
+_KR_MARKETING_RE = re.compile(
+    r"양산|출시|나노|소비\s*전력|읽기\s*속도|데이터\s*전송|인치|픽셀|화소|Gbps|GB|TB"
+)
+
+
+def _looks_like_risk_text(text: str | None) -> bool:
+    """True if ``text`` reads as genuine KR 위험요소 / 재무위험관리 prose.
+
+    Rejects credit-rating legends, product-marketing copy, cross-reference
+    stubs, and bodies too short or too sparse in risk language. 재무위험관리정책 /
+    시장위험 financial-risk-management notes are accepted (they carry dense 위험
+    vocabulary); marketing spec copy and rating tables are not.
+    """
+    if not text:
+        return False
+    joined = re.sub(r"\s+", " ", text).strip()
+    if len(joined) < 200:
+        return False
+    head = joined[:1500]
+    # Credit-rating legend (rating-definition vocabulary clustered up front).
+    if len(_KR_RATING_RE.findall(head)) >= 2:
+        return False
+    risk_hits = len(_KR_RISK_RE.findall(head))
+    marketing_hits = len(_KR_MARKETING_RE.findall(head))
+    # Marketing / spec copy: many product terms, little risk language.
+    if marketing_hits >= 3 and risk_hits < 8:
+        return False
+    if risk_hits < 5:
+        return False
+    return True
+
+
 def _is_toc_chunk(chunk: str) -> bool:
     """Heuristic: a table-of-contents entry, not a real section body.
 
@@ -221,6 +273,12 @@ def _extract_sections(
             if name != section_name
             for m in ms
         )
+        # For the risk section, collect *all* substantive non-ToC candidate
+        # bodies that pass the content validator and pick the one with the
+        # highest risk-language density (a dedicated 위험요소 / 시장위험 section beats
+        # a thin financial-risk note). If none pass, leave ``risks`` unset (None)
+        # rather than emit marketing copy or a rating legend.
+        risk_candidates: list[tuple[int, int, str]] = []
         for m in matches:
             body_start = m.end()
             end = len(plain)
@@ -233,9 +291,21 @@ def _extract_sections(
             chunk = plain[body_start:end].strip()
             if len(chunk) > max_chars:
                 chunk = chunk[:max_chars]
-            if len(chunk) >= min_body and not _is_toc_chunk(chunk):
-                extracted[section_name] = chunk
-                break
+            if len(chunk) < min_body or _is_toc_chunk(chunk):
+                continue
+            if section_name == "risks":
+                if not _looks_like_risk_text(chunk):
+                    continue
+                density = len(_KR_RISK_RE.findall(chunk[:2000]))
+                risk_candidates.append((density, -body_start, chunk))
+                continue
+            extracted[section_name] = chunk
+            break
+
+        if section_name == "risks" and risk_candidates:
+            # Highest density wins; tie-break on earliest occurrence.
+            risk_candidates.sort(key=lambda c: (c[0], c[1]), reverse=True)
+            extracted["risks"] = risk_candidates[0][2]
 
     return extracted
 
@@ -1045,12 +1115,15 @@ class DartProvider:
             )
             return FilingData(ticker=ticker)
 
+        # Group candidate 사업보고서 by *fiscal year* (parsed from the report
+        # period), not by filing_date. A late-filed amendment of an OLD report
+        # (e.g. Doosan's 2024 [기재정정]사업보고서 (2020.12)) otherwise slips into the
+        # trailing-3-by-date window and is mislabeled fy=2020, breaking the
+        # strictly-descending fiscal_year invariant. Within a fiscal year we try
+        # the latest-filed report first (an amendment supersedes the original).
         fallback_date: date | None = None
-        history: list[FilingData] = []
-        seen_years: set[int] = set()
+        by_year: dict[int, list[tuple[date, str]]] = {}
         for _, report in reports.iterrows():
-            if len(history) >= 3:
-                break
             rcept_no = str(report.get("rcept_no", "")).strip()
             filing_date = _parse_date_yyyymmdd(report.get("rcept_dt"))
             fiscal_year = _fiscal_year_from_report_nm(
@@ -1058,29 +1131,35 @@ class DartProvider:
             )
             if fallback_date is None:
                 fallback_date = filing_date
-            if not rcept_no:
+            if not rcept_no or fiscal_year is None or filing_date is None:
                 continue
-            # One entry per distinct fiscal year (skip 정정/[첨부] duplicates).
-            if fiscal_year is not None and fiscal_year in seen_years:
-                continue
+            by_year.setdefault(fiscal_year, []).append((filing_date, rcept_no))
 
-            try:
-                doc_text = self._fetch_document(rcept_no)
-                sections = _extract_sections(doc_text) if doc_text else {}
-            except Exception as e:
-                logger.warning(
-                    "DART document fetch/parse failed for %s %s: %s",
-                    ticker,
-                    rcept_no,
-                    e,
-                )
-                continue
-            if not sections.get("business_overview"):
-                continue
-            if fiscal_year is not None:
-                seen_years.add(fiscal_year)
-            history.append(
-                FilingData(
+        history: list[FilingData] = []
+        # Newest distinct fiscal years, descending → strictly-descending labels;
+        # collect up to 3 that actually extract (reach past a year that fails).
+        for fiscal_year in sorted(by_year, reverse=True):
+            if len(history) >= 3:
+                break
+            chosen: FilingData | None = None
+            # Latest-filed report for this year first (amendment over original).
+            for filing_date, rcept_no in sorted(
+                by_year[fiscal_year], key=lambda fr: fr[0], reverse=True
+            ):
+                try:
+                    doc_text = self._fetch_document(rcept_no)
+                    sections = _extract_sections(doc_text) if doc_text else {}
+                except Exception as e:
+                    logger.warning(
+                        "DART document fetch/parse failed for %s %s: %s",
+                        ticker,
+                        rcept_no,
+                        e,
+                    )
+                    continue
+                if not sections.get("business_overview"):
+                    continue
+                chosen = FilingData(
                     ticker=ticker,
                     filing_date=filing_date,
                     filing_type="사업보고서",
@@ -1088,8 +1167,11 @@ class DartProvider:
                     risks=sections.get("risks"),
                     mda=sections.get("mda"),
                     fiscal_year=fiscal_year,
+                    accession=rcept_no,
                 )
-            )
+                break
+            if chosen is not None:
+                history.append(chosen)
 
         if history:
             top = history[0]
@@ -1102,6 +1184,7 @@ class DartProvider:
                 mda=top.mda,
                 governance=top.governance,
                 fiscal_year=top.fiscal_year,
+                accession=top.accession,
                 history=history,
             )
 
