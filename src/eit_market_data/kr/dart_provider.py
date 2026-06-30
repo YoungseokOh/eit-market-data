@@ -1006,6 +1006,19 @@ class DartProvider:
     def _fetch_filing_sync(self, ticker: str, as_of: date) -> FilingData:
         corp_code = self._ticker_to_corp_code(ticker)
         if not corp_code:
+            # Alphanumeric KRX codes (e.g. ``0126Z0`` = 삼성에피스홀딩스, a newly
+            # spun-off holding company) are special/temporary trading codes that
+            # have no DART corp_code mapping and therefore no standalone
+            # 사업보고서. Record the reason rather than silently returning empty.
+            if any(ch.isalpha() for ch in str(ticker)):
+                logger.warning(
+                    "No DART corp_code for special KRX code %s "
+                    "(preferred/holding/when-issued code with no standalone "
+                    "사업보고서); leaving filing empty",
+                    ticker,
+                )
+            else:
+                logger.info("No DART corp_code for %s; leaving filing empty", ticker)
             return FilingData(ticker=ticker)
 
         try:
@@ -1017,10 +1030,19 @@ class DartProvider:
             return FilingData(ticker=ticker)
 
         if report_list is None or report_list.empty:
+            logger.info(
+                "No DART 사업보고서 found for %s (corp_code=%s) on/before %s",
+                ticker,
+                corp_code,
+                as_of,
+            )
             return FilingData(ticker=ticker)
 
         reports = self._filing_report_candidates(report_list, as_of)
         if reports.empty:
+            logger.info(
+                "No annual 사업보고서 candidate for %s on/before %s", ticker, as_of
+            )
             return FilingData(ticker=ticker)
 
         fallback_date: date | None = None
