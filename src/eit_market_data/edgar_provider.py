@@ -26,6 +26,42 @@ logger = logging.getLogger(__name__)
 _EDGAR_SEMAPHORE = asyncio.Semaphore(5)
 _EDGAR_DELAY = 0.2  # seconds between requests
 
+# Optional persistent URL->response cache for SEC GETs. Enabled via
+# EIT_EDGAR_FILING_CACHE for historical backfills, where the same immutable
+# 10-K documents (and each ticker's submissions index) are otherwise re-fetched
+# once per month across dozens of months. Filed documents never change, and PIT
+# filtering is applied in code by filingDate, so serving a cached body is
+# correct for past months. Default OFF so the daily / current-month path always
+# sees fresh submissions data (a newly filed report must not be masked by a
+# stale cache entry).
+_FILING_CACHE_DIR = os.environ.get(
+    "EIT_EDGAR_FILING_CACHE_DIR",
+    os.path.join(os.getcwd(), "data", "edgar_filing_cache"),
+)
+_FILING_CACHE_SIZE_LIMIT = int(
+    os.environ.get("EIT_EDGAR_FILING_CACHE_SIZE_LIMIT_BYTES", str(20 * 1024 * 1024 * 1024))
+)
+_filing_cache = None  # lazily opened diskcache.Cache
+
+
+def _filing_cache_enabled() -> bool:
+    return os.environ.get("EIT_EDGAR_FILING_CACHE", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
+def _get_filing_cache():  # noqa: ANN202
+    global _filing_cache
+    if _filing_cache is None:
+        import diskcache
+
+        _filing_cache = diskcache.Cache(
+            _FILING_CACHE_DIR, size_limit=_FILING_CACHE_SIZE_LIMIT
+        )
+    return _filing_cache
+
 
 def _get_user_agent() -> str:
     """Get SEC EDGAR User-Agent from environment."""
@@ -60,6 +96,13 @@ async def _rate_limited_get(client, url: str, attempts: int = 3) -> str | None:
     retry the first document fetched after the metadata calls can fail and leave
     an otherwise-extractable filing empty.
     """
+    cache_on = _filing_cache_enabled()
+    if cache_on:
+        cache = _get_filing_cache()
+        cached = cache.get(url)
+        if cached is not None:
+            return cached  # type: ignore[no-any-return]
+
     async with _EDGAR_SEMAPHORE:
         last_exc: Exception | None = None
         for attempt in range(attempts):
@@ -67,7 +110,10 @@ async def _rate_limited_get(client, url: str, attempts: int = 3) -> str | None:
                 resp = await client.get(url)
                 resp.raise_for_status()
                 await asyncio.sleep(_EDGAR_DELAY)
-                return resp.text
+                text = resp.text
+                if cache_on:
+                    _get_filing_cache().set(url, text)
+                return text
             except Exception as e:  # noqa: BLE001
                 last_exc = e
                 await asyncio.sleep(_EDGAR_DELAY * (attempt + 2))
