@@ -80,6 +80,11 @@ async def _rate_limited_get(client, url: str, attempts: int = 3) -> str | None:
 # ---------------------------------------------------------------------------
 
 _CIK_CACHE: dict[str, str] = {}
+# Whether the full company_tickers.json map has been loaded into _CIK_CACHE this
+# process. Delisted / unmapped tickers are absent from that file, so without this
+# flag every lookup for such a ticker (there are ~130 in a PIT 2019 universe)
+# re-downloads the multi-MB file. Load it once; treat misses as terminal None.
+_CIK_MAP_LOADED: bool = False
 
 # A few active filers are absent from SEC's ``company_tickers.json`` /
 # ``company_tickers_exchange.json`` maps (their submission ``tickers`` list is
@@ -92,11 +97,16 @@ _CIK_OVERRIDES: dict[str, str] = {
 
 async def _ticker_to_cik(client, ticker: str) -> str | None:
     """Convert ticker to CIK (Central Index Key)."""
+    global _CIK_MAP_LOADED
     key = ticker.upper()
-    if ticker in _CIK_CACHE:
-        return _CIK_CACHE[ticker]
     if key in _CIK_OVERRIDES:
         return _CIK_OVERRIDES[key]
+    if key in _CIK_CACHE:
+        return _CIK_CACHE[key]
+    if _CIK_MAP_LOADED:
+        # Map already loaded and this ticker is not in it (delisted / unmapped):
+        # a re-fetch would return the same file, so treat the miss as terminal.
+        return None
 
     url = "https://www.sec.gov/files/company_tickers.json"
     text = await _rate_limited_get(client, url)
@@ -110,8 +120,9 @@ async def _ticker_to_cik(client, ticker: str) -> str | None:
         for _key, entry in data.items():
             t = entry.get("ticker", "").upper()
             cik = str(entry.get("cik_str", ""))
-            _CIK_CACHE[t] = cik.zfill(10)
-
+            if t and cik:
+                _CIK_CACHE[t] = cik.zfill(10)
+        _CIK_MAP_LOADED = True
         return _CIK_CACHE.get(key) or _CIK_OVERRIDES.get(key)
     except Exception as e:
         logger.warning("Failed to parse CIK data: %s", e)

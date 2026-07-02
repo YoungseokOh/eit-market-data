@@ -282,8 +282,12 @@ class YFinanceProvider:
                 continue
             if df is not None and not df.empty:
                 break
-            if attempt < 2:
-                time.sleep(1.0 * (attempt + 1))
+            # Empty with no exception = Yahoo genuinely has no data for this
+            # ticker (delisted / not-yet-listed). yfinance already retried
+            # internally, so re-calling won't change the result — stop now
+            # instead of burning two more round-trips + sleeps per empty ticker
+            # (there are ~130 such names in a PIT 2019 universe).
+            break
 
         if df is None or df.empty:
             if last_error is not None:
