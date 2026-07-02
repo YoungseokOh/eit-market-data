@@ -11,6 +11,7 @@ import gzip
 import hashlib
 import json
 import logging
+import os
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -67,8 +68,24 @@ def create_real_providers(fundamentals_source: str = "yfinance") -> dict:
     else:
         raise ValueError(f"unknown fundamentals_source: {fundamentals_source!r}")
 
+    # Optional survivorship-bias fallback: when EIT_US_DELISTED_FALLBACK is set,
+    # wrap the *price* provider so delisted tickers that yfinance purges (HTTP
+    # 404) are back-filled from stockanalysis.com. It is fill-empties-only — a
+    # still-listed ticker that yfinance serves is never touched, so the existing
+    # bundles are byte-identical. Inert (yfinance-only) unless the env var is
+    # set. See docs/us_delisted_supplementary_source.md.
+    price_provider: Any = yf
+    if os.getenv("EIT_US_DELISTED_FALLBACK", "").strip().lower() in ("1", "true", "yes"):
+        from eit_market_data.stockanalysis_provider import (
+            FallbackPriceProvider,
+            StockAnalysisPriceProvider,
+        )
+
+        price_provider = FallbackPriceProvider(yf, StockAnalysisPriceProvider())
+        logger.info("US delisted-price fallback (stockanalysis.com) ENABLED")
+
     return {
-        "price_provider": yf,
+        "price_provider": price_provider,
         "fundamental_provider": fundamental_provider,
         "filing_provider": EdgarFilingProvider(),
         "macro_provider": FredMacroProvider(),
