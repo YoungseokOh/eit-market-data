@@ -173,7 +173,13 @@ FilingData.model_rebuild()
 # ---------------------------------------------------------------------------
 
 class NewsItem(BaseModel):
-    """A single news headline/article."""
+    """A single news headline/article.
+
+    ``cluster_size`` and ``relevance`` are populated by the KR news filter layer
+    (:mod:`eit_market_data.kr.news_filter`). They are optional and default to a
+    single-article cluster / unset relevance so pre-filter JSON artifacts that
+    omit them validate unchanged (backward compatible).
+    """
 
     date: date
     published_at: datetime | None = None
@@ -181,6 +187,8 @@ class NewsItem(BaseModel):
     headline: str
     summary: str = ""
     url: str | None = None
+    cluster_size: int = 1
+    relevance: float | None = None
 
 
 # ---------------------------------------------------------------------------

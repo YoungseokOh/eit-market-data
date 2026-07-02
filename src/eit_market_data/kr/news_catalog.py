@@ -15,6 +15,7 @@ from eit_market_data.kr.naver_news_provider import (
     NaverArchiveNewsProvider,
     NaverArchiveNewsRecord,
 )
+from eit_market_data.kr.news_filter import NewsFilterConfig, filter_news_window
 from eit_market_data.schemas.snapshot import NewsItem
 
 
@@ -171,6 +172,8 @@ class KrNewsCatalogStore:
         ticker: str,
         as_of: date,
         lookback_days: int = 30,
+        company_name: str | None = None,
+        filter_config: NewsFilterConfig | None = None,
     ) -> KrNewsWindow:
         norm_ticker = normalize_ticker(ticker)
         window_start = as_of - timedelta(days=max(lookback_days - 1, 0))
@@ -204,16 +207,26 @@ class KrNewsCatalogStore:
                 )
 
         audit_records.sort(key=_record_sort_key, reverse=True)
+        # Reduce the raw window to a deduped, ranked, PIT-safe set. ``audit``
+        # keeps every raw record; ``items`` is the filtered/ranked view.
+        scored = filter_news_window(
+            audit_records,
+            as_of=as_of,
+            company_name=company_name,
+            config=filter_config,
+        )
         items = [
             NewsItem(
-                date=record.date,
-                published_at=record.published_at,
-                source=record.source,
-                headline=record.headline,
+                date=scored_record.record.date,
+                published_at=scored_record.record.published_at,
+                source=scored_record.record.source,
+                headline=scored_record.record.headline,
                 summary="",
-                url=record.url,
+                url=scored_record.record.url,
+                cluster_size=scored_record.cluster_size,
+                relevance=scored_record.relevance,
             )
-            for record in audit_records
+            for scored_record in scored
         ]
         coverage = KrNewsWindowCoverage(
             ticker=norm_ticker,
