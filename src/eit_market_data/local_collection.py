@@ -69,6 +69,13 @@ KOSPI200_REVIEW_MONTHS = frozenset({6, 12})
 # list (or a today()-stamped current-membership fallback applied to a historical
 # month) shows up as a large round-trip; legitimate off-cycle changes do not.
 KOSPI200_OFFCYCLE_CHURN_THRESHOLD = 10
+# The pykrx KOSPI200 deposit-file endpoint occasionally returns 201-202 distinct
+# common-stock constituents on certain historical dates (a known quirk around
+# constituent events; no duplicates or preferred shares involved). Treat any list
+# within this tolerance of the nominal 200 as a valid point-in-time membership
+# rather than fabricating a trim to exactly 200. Genuinely broken responses (far
+# from 200) still fail the size gate and fall back to carry-forward.
+KOSPI200_SIZE_TOLERANCE = 3
 
 logger = logging.getLogger(__name__)
 
@@ -726,7 +733,7 @@ def _build_kospi200_records(
     pykrx_tickers = _fetch_kospi200_tickers_from_pykrx(as_of)
     rows = [{"ticker": ticker, "source_name": ""} for ticker in pykrx_tickers]
 
-    pykrx_ok = len(rows) == 200
+    pykrx_ok = abs(len(rows) - 200) <= KOSPI200_SIZE_TOLERANCE
 
     # Off-cycle churn guard: only applies when we have a clean pykrx list AND a
     # previous month to compare against. June/December reviews are never blocked.
@@ -784,8 +791,11 @@ def _build_kospi200_records(
                 "membership available to carry forward."
             )
 
-    if len(rows) != 200:
-        raise RuntimeError(f"KOSPI200 universe source returned {len(rows)} rows; expected 200.")
+    if abs(len(rows) - 200) > KOSPI200_SIZE_TOLERANCE:
+        raise RuntimeError(
+            f"KOSPI200 universe source returned {len(rows)} rows; expected "
+            f"200 +/- {KOSPI200_SIZE_TOLERANCE}."
+        )
 
     records = pd.DataFrame(rows)
     cap_frame = _market_cap_candidates_for_market(as_of, "KOSPI")
