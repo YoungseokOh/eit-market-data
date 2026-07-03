@@ -34,14 +34,23 @@ _EDGAR_DELAY = 0.2  # seconds between requests
 # correct for past months. Default OFF so the daily / current-month path always
 # sees fresh submissions data (a newly filed report must not be masked by a
 # stale cache entry).
-_FILING_CACHE_DIR = os.environ.get(
-    "EIT_EDGAR_FILING_CACHE_DIR",
-    os.path.join(os.getcwd(), "data", "edgar_filing_cache"),
-)
-_FILING_CACHE_SIZE_LIMIT = int(
-    os.environ.get("EIT_EDGAR_FILING_CACHE_SIZE_LIMIT_BYTES", str(20 * 1024 * 1024 * 1024))
-)
+def _filing_cache_dir() -> str:
+    return os.environ.get(
+        "EIT_EDGAR_FILING_CACHE_DIR",
+        os.path.join(os.getcwd(), "data", "edgar_filing_cache"),
+    )
+
+
+def _filing_cache_size_limit() -> int:
+    return int(
+        os.environ.get(
+            "EIT_EDGAR_FILING_CACHE_SIZE_LIMIT_BYTES", str(20 * 1024 * 1024 * 1024)
+        )
+    )
+
+
 _filing_cache = None  # lazily opened diskcache.Cache
+_filing_cache_dir_open: str | None = None  # dir the open cache points at
 
 
 def _filing_cache_enabled() -> bool:
@@ -53,13 +62,17 @@ def _filing_cache_enabled() -> bool:
 
 
 def _get_filing_cache():  # noqa: ANN202
-    global _filing_cache
-    if _filing_cache is None:
+    # Resolve the dir at call time so an env override (e.g. in tests) takes
+    # effect and reopens the cache if the target dir changed.
+    global _filing_cache, _filing_cache_dir_open
+    want_dir = _filing_cache_dir()
+    if _filing_cache is None or _filing_cache_dir_open != want_dir:
         import diskcache
 
-        _filing_cache = diskcache.Cache(
-            _FILING_CACHE_DIR, size_limit=_FILING_CACHE_SIZE_LIMIT
-        )
+        if _filing_cache is not None:
+            _filing_cache.close()
+        _filing_cache = diskcache.Cache(want_dir, size_limit=_filing_cache_size_limit())
+        _filing_cache_dir_open = want_dir
     return _filing_cache
 
 

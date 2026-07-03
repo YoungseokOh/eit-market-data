@@ -235,6 +235,11 @@ class SnapshotMetadata(BaseModel):
     filing_hash: str = ""
     news_hash: str = ""
     macro_hash: str = ""
+    # Regime metadata. `short_sale_ban` marks months inside a market-wide
+    # short-selling ban (KR: 2020-03..2021-05 COVID, 2023-11..2025-03). A
+    # long/short backtest must not assume executable shorts in these windows.
+    # Optional / defaults False so pre-existing bundles validate unchanged.
+    short_sale_ban: bool | None = None
 
 
 # ---------------------------------------------------------------------------
