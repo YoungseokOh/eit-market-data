@@ -780,6 +780,22 @@ class DartProvider:
             )
         return None
 
+    def _fetch_finstate_all(self, corp_code: str, year: str, reprt_code: str):  # noqa: ANN202
+        """Cache-only full-statements (finstate_all) lookup.
+
+        The major-accounts ``finstate`` endpoint omits COGS, gross profit and the
+        cash-flow statement (OCF); those live in ``finstate_all``. This reads only
+        what the controlled ``scripts/backfill_finstate_all.py`` driver has cached
+        under ``finstate_all:corp:year:reprt:fs_div`` and NEVER issues a live call,
+        so a normal fundamentals build cannot trigger unthrottled DART traffic for
+        these fields. Returns None when the period is not cached.
+        """
+        for fs_div in ("CFS", "OFS"):
+            cached = self._cache_get(f"finstate_all:{corp_code}:{year}:{reprt_code}:{fs_div}")
+            if cached is not None:
+                return cached
+        return None
+
     def _pick_account_value(self, df: Any, candidates: list[str]) -> float | None:
         if df is None or df.empty or "account_nm" not in df.columns:
             return None
@@ -886,7 +902,13 @@ class DartProvider:
             self._cache_set(cache_key, result, _REPORT_LIST_TTL)
         return result
 
-    def _build_raw_quarter_data(self, df_fin: Any) -> dict[str, float | None]:
+    def _build_raw_quarter_data(
+        self, df_fin: Any, df_all: Any = None
+    ) -> dict[str, float | None]:
+        # COGS / gross profit / OCF are absent from the major-accounts finstate;
+        # read them from the full-statements finstate_all when available, falling
+        # back to df_fin (which yields None) so existing fields are untouched.
+        df_flow = df_all if df_all is not None else df_fin
         raw = {
             # Flow (income/cash-flow) fields: read the cumulative YTD column so the
             # downstream per-quarter decomposition is correct.
@@ -905,20 +927,20 @@ class DartProvider:
             "current_liabilities": self._pick_account_value(
                 df_fin, _ACCOUNT_MAP["current_liabilities"]
             ),
-            "gross_profit": self._pick_cumulative_value(df_fin, _ACCOUNT_MAP["gross_profit"]),
+            "gross_profit": self._pick_cumulative_value(df_flow, _ACCOUNT_MAP["gross_profit"]),
             "total_debt": self._pick_account_value(df_fin, _ACCOUNT_MAP["total_debt"]),
             "eps": self._pick_eps_value(df_fin),
             "interest_expense": self._pick_cumulative_value(
                 df_fin, _ACCOUNT_MAP["interest_expense"]
             ),
             "operating_cash_flow": self._pick_cumulative_value(
-                df_fin, _ACCOUNT_MAP["operating_cash_flow"]
+                df_flow, _ACCOUNT_MAP["operating_cash_flow"]
             ),
             "capital_expenditure": self._pick_cumulative_value(
                 df_fin, _ACCOUNT_MAP["capital_expenditure"]
             ),
             "cost_of_goods_sold": self._pick_cumulative_value(
-                df_fin, _ACCOUNT_MAP["cost_of_goods_sold"]
+                df_flow, _ACCOUNT_MAP["cost_of_goods_sold"]
             ),
             "cash_and_equivalents": self._pick_account_value(
                 df_fin, _ACCOUNT_MAP["cash_and_equivalents"]
@@ -976,7 +998,14 @@ class DartProvider:
             if df_fin is None or df_fin.empty:
                 continue
 
-            raw_values = self._build_raw_quarter_data(df_fin)
+            try:
+                df_all = self._fetch_finstate_all(
+                    corp_code, entry["bsns_year"], entry["reprt_code"]
+                )
+            except Exception:
+                df_all = None
+
+            raw_values = self._build_raw_quarter_data(df_fin, df_all)
             if all(value is None for value in raw_values.values()):
                 continue
 
