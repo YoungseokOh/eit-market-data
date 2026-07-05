@@ -1,0 +1,570 @@
+{
+  "counts": {
+    "ma": 41,
+    "still_trading": 9,
+    "spinoff": 3,
+    "failure_to_zero": 3
+  },
+  "tickers": [
+    {
+      "ticker": "ABMD",
+      "category": "ma",
+      "reason": "Abiomed acquired by Johnson & Johnson 2022-12",
+      "universe_span": "2019-01..2022-11",
+      "months_in_universe": 47,
+      "any_prices": false,
+      "last_priced_month": null,
+      "last_close": null
+    },
+    {
+      "ticker": "ADS",
+      "category": "still_trading",
+      "reason": "Alliance Data renamed Bread Financial (BFH); still trades",
+      "universe_span": "2019-01..2020-05",
+      "months_in_universe": 17,
+      "any_prices": false,
+      "last_priced_month": null,
+      "last_close": null
+    },
+    {
+      "ticker": "AGN",
+      "category": "ma",
+      "reason": "Allergan acquired by AbbVie 2020-05",
+      "universe_span": "2019-01..2020-04",
+      "months_in_universe": 16,
+      "any_prices": false,
+      "last_priced_month": null,
+      "last_close": null
+    },
+    {
+      "ticker": "ALXN",
+      "category": "ma",
+      "reason": "Alexion acquired by AstraZeneca 2021-07",
+      "universe_span": "2019-01..2021-06",
+      "months_in_universe": 30,
+      "any_prices": false,
+      "last_priced_month": null,
+      "last_close": null
+    },
+    {
+      "ticker": "ANSS",
+      "category": "still_trading",
+      "reason": "Ansys index removal; later Synopsys acq 2025; traded in-window",
+      "universe_span": "2019-01..2025-06",
+      "months_in_universe": 78,
+      "any_prices": true,
+      "last_priced_month": "2022-12",
+      "last_close": 241.59
+    },
+    {
+      "ticker": "APC",
+      "category": "ma",
+      "reason": "Anadarko acquired by Occidental 2019-08",
+      "universe_span": "2019-01..2019-07",
+      "months_in_universe": 7,
+      "any_prices": false,
+      "last_priced_month": null,
+      "last_close": null
+    },
+    {
+      "ticker": "ARNC",
+      "category": "spinoff",
+      "reason": "Arconic Inc split into Howmet (HWM) + Arconic Corp 2020-04",
+      "universe_span": "2019-01..2020-03",
+      "months_in_universe": 15,
+      "any_prices": false,
+      "last_priced_month": null,
+      "last_close": null
+    },
+    {
+      "ticker": "ATVI",
+      "category": "ma",
+      "reason": "Activision Blizzard acquired by Microsoft 2023-10",
+      "universe_span": "2019-01..2023-09",
+      "months_in_universe": 57,
+      "any_prices": true,
+      "last_priced_month": "2022-12",
+      "last_close": 75.73
+    },
+    {
+      "ticker": "CELG",
+      "category": "ma",
+      "reason": "Celgene acquired by Bristol-Myers Squibb 2019-11",
+      "universe_span": "2019-01..2019-10",
+      "months_in_universe": 10,
+      "any_prices": false,
+      "last_priced_month": null,
+      "last_close": null
+    },
+    {
+      "ticker": "CERN",
+      "category": "ma",
+      "reason": "Cerner acquired by Oracle 2022-06",
+      "universe_span": "2019-01..2022-05",
+      "months_in_universe": 41,
+      "any_prices": false,
+      "last_priced_month": null,
+      "last_close": null
+    },
+    {
+      "ticker": "CMA",
+      "category": "still_trading",
+      "reason": "Comerica index removal; still trades",
+      "universe_span": "2019-01..2024-05",
+      "months_in_universe": 65,
+      "any_prices": true,
+      "last_priced_month": "2022-12",
+      "last_close": 57.08
+    },
+    {
+      "ticker": "CTLT",
+      "category": "ma",
+      "reason": "Catalent acquired by Novo Holdings 2024",
+      "universe_span": "2020-09..2024-11",
+      "months_in_universe": 51,
+      "any_prices": true,
+      "last_priced_month": "2022-12",
+      "last_close": 45.01
+    },
+    {
+      "ticker": "CTXS",
+      "category": "ma",
+      "reason": "Citrix taken private by Vista/Elliott 2022-09",
+      "universe_span": "2019-01..2022-09",
+      "months_in_universe": 45,
+      "any_prices": false,
+      "last_priced_month": null,
+      "last_close": null
+    },
+    {
+      "ticker": "CXO",
+      "category": "ma",
+      "reason": "Concho Resources acquired by ConocoPhillips 2021-01",
+      "universe_span": "2019-01..2020-12",
+      "months_in_universe": 24,
+      "any_prices": false,
+      "last_priced_month": null,
+      "last_close": null
+    },
+    {
+      "ticker": "DAY",
+      "category": "still_trading",
+      "reason": "Ceridian renamed Dayforce (DAY); still trades",
+      "universe_span": "2019-01..2026-01",
+      "months_in_universe": 85,
+      "any_prices": true,
+      "last_priced_month": "2022-12",
+      "last_close": 64.15
+    },
+    {
+      "ticker": "DFS",
+      "category": "ma",
+      "reason": "Discover acquired by Capital One 2025",
+      "universe_span": "2019-01..2025-04",
+      "months_in_universe": 76,
+      "any_prices": false,
+      "last_priced_month": null,
+      "last_close": null
+    },
+    {
+      "ticker": "DISCA",
+      "category": "ma",
+      "reason": "Discovery merged into Warner Bros. Discovery 2022-04",
+      "universe_span": "2019-01..2022-03",
+      "months_in_universe": 39,
+      "any_prices": false,
+      "last_priced_month": null,
+      "last_close": null
+    },
+    {
+      "ticker": "DISCK",
+      "category": "ma",
+      "reason": "Discovery merged into Warner Bros. Discovery 2022-04",
+      "universe_span": "2019-01..2022-03",
+      "months_in_universe": 39,
+      "any_prices": false,
+      "last_priced_month": null,
+      "last_close": null
+    },
+    {
+      "ticker": "DISH",
+      "category": "ma",
+      "reason": "DISH Network merged into EchoStar 2023-12 (stock-for-stock)",
+      "universe_span": "2019-01..2023-05",
+      "months_in_universe": 53,
+      "any_prices": false,
+      "last_priced_month": null,
+      "last_close": null
+    },
+    {
+      "ticker": "DRE",
+      "category": "ma",
+      "reason": "Duke Realty acquired by Prologis 2022-10",
+      "universe_span": "2019-01..2022-09",
+      "months_in_universe": 45,
+      "any_prices": false,
+      "last_priced_month": null,
+      "last_close": null
+    },
+    {
+      "ticker": "DWDP",
+      "category": "spinoff",
+      "reason": "DowDuPont split into DOW / DD / CTVA 2019",
+      "universe_span": "2019-01..2019-05",
+      "months_in_universe": 5,
+      "any_prices": false,
+      "last_priced_month": null,
+      "last_close": null
+    },
+    {
+      "ticker": "ETFC",
+      "category": "ma",
+      "reason": "E*Trade acquired by Morgan Stanley 2020-10",
+      "universe_span": "2019-01..2020-09",
+      "months_in_universe": 21,
+      "any_prices": false,
+      "last_priced_month": null,
+      "last_close": null
+    },
+    {
+      "ticker": "FBHS",
+      "category": "spinoff",
+      "reason": "Fortune Brands split (Fortune Brands Innovations) 2022",
+      "universe_span": "2019-01..2022-11",
+      "months_in_universe": 47,
+      "any_prices": false,
+      "last_priced_month": null,
+      "last_close": null
+    },
+    {
+      "ticker": "FLIR",
+      "category": "ma",
+      "reason": "FLIR Systems acquired by Teledyne 2021-05",
+      "universe_span": "2019-01..2021-04",
+      "months_in_universe": 28,
+      "any_prices": false,
+      "last_priced_month": null,
+      "last_close": null
+    },
+    {
+      "ticker": "FRC",
+      "category": "failure_to_zero",
+      "reason": "First Republic \u2014 FDIC receivership, sold to JPMorgan 2023-05; wiped",
+      "universe_span": "2019-01..2023-04",
+      "months_in_universe": 52,
+      "any_prices": false,
+      "last_priced_month": null,
+      "last_close": null
+    },
+    {
+      "ticker": "GPS",
+      "category": "still_trading",
+      "reason": "Gap index removal; still trades (GAP)",
+      "universe_span": "2019-01..2022-01",
+      "months_in_universe": 37,
+      "any_prices": false,
+      "last_priced_month": null,
+      "last_close": null
+    },
+    {
+      "ticker": "HES",
+      "category": "ma",
+      "reason": "Hess acquired by Chevron (pending); still listed in-window",
+      "universe_span": "2019-01..2025-06",
+      "months_in_universe": 78,
+      "any_prices": false,
+      "last_priced_month": null,
+      "last_close": null
+    },
+    {
+      "ticker": "HFC",
+      "category": "ma",
+      "reason": "HollyFrontier merged into HF Sinclair 2022",
+      "universe_span": "2019-01..2021-05",
+      "months_in_universe": 29,
+      "any_prices": false,
+      "last_priced_month": null,
+      "last_close": null
+    },
+    {
+      "ticker": "HOLX",
+      "category": "still_trading",
+      "reason": "Hologic index removal; still trades",
+      "universe_span": "2019-01..2026-03",
+      "months_in_universe": 87,
+      "any_prices": true,
+      "last_priced_month": "2022-12",
+      "last_close": 74.81
+    },
+    {
+      "ticker": "INFO",
+      "category": "ma",
+      "reason": "IHS Markit acquired by S&P Global 2022-02",
+      "universe_span": "2019-01..2022-02",
+      "months_in_universe": 38,
+      "any_prices": false,
+      "last_priced_month": null,
+      "last_close": null
+    },
+    {
+      "ticker": "IPG",
+      "category": "still_trading",
+      "reason": "Interpublic index removal; Omnicom merger 2025; traded in-window",
+      "universe_span": "2019-01..2025-10",
+      "months_in_universe": 82,
+      "any_prices": true,
+      "last_priced_month": "2022-12",
+      "last_close": 29.64
+    },
+    {
+      "ticker": "JNPR",
+      "category": "ma",
+      "reason": "Juniper acquired by HPE 2025",
+      "universe_span": "2019-01..2025-06",
+      "months_in_universe": 78,
+      "any_prices": true,
+      "last_priced_month": "2022-12",
+      "last_close": 29.93
+    },
+    {
+      "ticker": "K",
+      "category": "ma",
+      "reason": "Kellogg split (Kellanova) then Mars acquisition 2025",
+      "universe_span": "2019-01..2025-11",
+      "months_in_universe": 83,
+      "any_prices": true,
+      "last_priced_month": "2022-12",
+      "last_close": 60.49
+    },
+    {
+      "ticker": "KSU",
+      "category": "ma",
+      "reason": "Kansas City Southern acquired by Canadian Pacific 2021-12",
+      "universe_span": "2019-01..2021-11",
+      "months_in_universe": 35,
+      "any_prices": false,
+      "last_priced_month": null,
+      "last_close": null
+    },
+    {
+      "ticker": "LLL",
+      "category": "ma",
+      "reason": "L3 Technologies merged into L3Harris 2019-06",
+      "universe_span": "2019-01..2019-06",
+      "months_in_universe": 6,
+      "any_prices": false,
+      "last_priced_month": null,
+      "last_close": null
+    },
+    {
+      "ticker": "MRO",
+      "category": "ma",
+      "reason": "Marathon Oil acquired by ConocoPhillips 2024-11",
+      "universe_span": "2019-01..2024-10",
+      "months_in_universe": 70,
+      "any_prices": false,
+      "last_priced_month": null,
+      "last_close": null
+    },
+    {
+      "ticker": "MXIM",
+      "category": "ma",
+      "reason": "Maxim Integrated acquired by Analog Devices 2021-08",
+      "universe_span": "2019-01..2021-07",
+      "months_in_universe": 31,
+      "any_prices": false,
+      "last_priced_month": null,
+      "last_close": null
+    },
+    {
+      "ticker": "NBL",
+      "category": "ma",
+      "reason": "Noble Energy acquired by Chevron 2020-10",
+      "universe_span": "2019-01..2020-09",
+      "months_in_universe": 21,
+      "any_prices": false,
+      "last_priced_month": null,
+      "last_close": null
+    },
+    {
+      "ticker": "NLSN",
+      "category": "ma",
+      "reason": "Nielsen taken private by PE consortium 2022-10",
+      "universe_span": "2019-01..2022-09",
+      "months_in_universe": 45,
+      "any_prices": false,
+      "last_priced_month": null,
+      "last_close": null
+    },
+    {
+      "ticker": "PBCT",
+      "category": "ma",
+      "reason": "People's United acquired by M&T Bank 2022-04",
+      "universe_span": "2019-01..2022-03",
+      "months_in_universe": 39,
+      "any_prices": false,
+      "last_priced_month": null,
+      "last_close": null
+    },
+    {
+      "ticker": "PXD",
+      "category": "ma",
+      "reason": "Pioneer Natural Resources acquired by ExxonMobil 2024-05",
+      "universe_span": "2019-01..2024-04",
+      "months_in_universe": 64,
+      "any_prices": false,
+      "last_priced_month": null,
+      "last_close": null
+    },
+    {
+      "ticker": "RE",
+      "category": "still_trading",
+      "reason": "Everest Re renamed Everest Group (EG); still trades",
+      "universe_span": "2019-01..2022-12",
+      "months_in_universe": 48,
+      "any_prices": false,
+      "last_priced_month": null,
+      "last_close": null
+    },
+    {
+      "ticker": "RHT",
+      "category": "ma",
+      "reason": "Red Hat acquired by IBM 2019-07",
+      "universe_span": "2019-01..2019-06",
+      "months_in_universe": 6,
+      "any_prices": false,
+      "last_priced_month": null,
+      "last_close": null
+    },
+    {
+      "ticker": "RTN",
+      "category": "ma",
+      "reason": "Raytheon merged into Raytheon Technologies (RTX) 2020-04",
+      "universe_span": "2019-01..2020-03",
+      "months_in_universe": 15,
+      "any_prices": false,
+      "last_priced_month": null,
+      "last_close": null
+    },
+    {
+      "ticker": "SBNY",
+      "category": "failure_to_zero",
+      "reason": "Signature Bank \u2014 FDIC receivership 2023-03; shareholders wiped",
+      "universe_span": "2021-12..2023-02",
+      "months_in_universe": 15,
+      "any_prices": false,
+      "last_priced_month": null,
+      "last_close": null
+    },
+    {
+      "ticker": "SEE",
+      "category": "still_trading",
+      "reason": "Sealed Air index removal; still trades",
+      "universe_span": "2019-01..2023-11",
+      "months_in_universe": 59,
+      "any_prices": true,
+      "last_priced_month": "2022-12",
+      "last_close": 46.42
+    },
+    {
+      "ticker": "SIVB",
+      "category": "failure_to_zero",
+      "reason": "SVB Financial \u2014 FDIC receivership 2023-03; shareholders wiped",
+      "universe_span": "2019-01..2023-02",
+      "months_in_universe": 50,
+      "any_prices": true,
+      "last_priced_month": "2022-12",
+      "last_close": 230.14
+    },
+    {
+      "ticker": "STI",
+      "category": "ma",
+      "reason": "SunTrust merged into Truist (with BB&T) 2019-12",
+      "universe_span": "2019-01..2019-11",
+      "months_in_universe": 11,
+      "any_prices": false,
+      "last_priced_month": null,
+      "last_close": null
+    },
+    {
+      "ticker": "TIF",
+      "category": "ma",
+      "reason": "Tiffany & Co. acquired by LVMH 2021-01",
+      "universe_span": "2019-01..2020-12",
+      "months_in_universe": 24,
+      "any_prices": false,
+      "last_priced_month": null,
+      "last_close": null
+    },
+    {
+      "ticker": "TSS",
+      "category": "ma",
+      "reason": "Total System Services acquired by Global Payments 2019-09",
+      "universe_span": "2019-01..2019-08",
+      "months_in_universe": 8,
+      "any_prices": false,
+      "last_priced_month": null,
+      "last_close": null
+    },
+    {
+      "ticker": "VAR",
+      "category": "ma",
+      "reason": "Varian acquired by Siemens Healthineers 2021-04",
+      "universe_span": "2019-01..2021-03",
+      "months_in_universe": 27,
+      "any_prices": false,
+      "last_priced_month": null,
+      "last_close": null
+    },
+    {
+      "ticker": "VIAB",
+      "category": "ma",
+      "reason": "Viacom merged with CBS into ViacomCBS 2019-12",
+      "universe_span": "2019-01..2019-11",
+      "months_in_universe": 11,
+      "any_prices": false,
+      "last_priced_month": null,
+      "last_close": null
+    },
+    {
+      "ticker": "WBA",
+      "category": "ma",
+      "reason": "Walgreens taken private by Sycamore 2025",
+      "universe_span": "2019-01..2025-07",
+      "months_in_universe": 79,
+      "any_prices": true,
+      "last_priced_month": "2022-12",
+      "last_close": 32.22
+    },
+    {
+      "ticker": "WCG",
+      "category": "ma",
+      "reason": "WellCare acquired by Centene 2020-01",
+      "universe_span": "2019-01..2019-12",
+      "months_in_universe": 12,
+      "any_prices": false,
+      "last_priced_month": null,
+      "last_close": null
+    },
+    {
+      "ticker": "XEC",
+      "category": "ma",
+      "reason": "Cimarex merged into Coterra Energy 2021-10",
+      "universe_span": "2019-01..2020-02",
+      "months_in_universe": 14,
+      "any_prices": false,
+      "last_priced_month": null,
+      "last_close": null
+    },
+    {
+      "ticker": "XLNX",
+      "category": "ma",
+      "reason": "Xilinx acquired by AMD 2022-02",
+      "universe_span": "2019-01..2022-01",
+      "months_in_universe": 37,
+      "any_prices": false,
+      "last_priced_month": null,
+      "last_close": null
+    }
+  ]
+}
