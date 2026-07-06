@@ -88,6 +88,38 @@ def test_pit_universe_none_hook_keeps_ndx_union(monkeypatch) -> None:
     assert uu.pit_universe(date(2023, 2, 28)) == ["AAPL", "ARM"]
 
 
+def test_pit_sp400_reverse_applies_change_log(monkeypatch) -> None:
+    """S&P MidCap 400 PIT membership undoes changes effective after as_of."""
+    current = {"AAON", "OLN", "NEWMID"}
+    changes = [
+        {"date": date(2024, 9, 20), "added": "NEWMID", "removed": "OLDMID"},
+        {"date": date(2023, 3, 15), "added": "OLN", "removed": "GONEMID"},
+    ]
+    monkeypatch.setitem(uu._CACHE, "sp400", (current, changes))
+
+    m_2023_01 = uu.pit_sp400(date(2023, 1, 31))
+    assert "NEWMID" not in m_2023_01 and "OLDMID" in m_2023_01
+    assert "OLN" not in m_2023_01 and "GONEMID" in m_2023_01
+    assert "AAON" in m_2023_01
+
+    m_2024_06 = uu.pit_sp400(date(2024, 6, 28))
+    assert "OLN" in m_2024_06 and "GONEMID" not in m_2024_06
+    assert "NEWMID" not in m_2024_06 and "OLDMID" in m_2024_06
+
+    assert uu.pit_sp400(date(2025, 1, 31)) == current
+
+
+def test_pit_universe_unions_sp400_when_enabled(monkeypatch) -> None:
+    """include_sp400 unions the mid-cap PIT membership into the universe."""
+    monkeypatch.setitem(uu._CACHE, "sp500", ({"AAPL"}, []))
+    monkeypatch.setitem(uu._CACHE, "sp400", ({"AAON"}, []))
+    monkeypatch.setitem(uu._CACHE, "ndx", set())
+    monkeypatch.setitem(uu._CACHE, "cikmap", {"AAPL": "1", "AAON": "2"})
+
+    assert uu.pit_universe(date(2024, 1, 31)) == ["AAPL"]  # off by default
+    assert uu.pit_universe(date(2024, 1, 31), include_sp400=True) == ["AAON", "AAPL"]
+
+
 def test_dedup_by_cik_collapses_share_classes(monkeypatch) -> None:
     # GOOG/GOOGL share a CIK -> collapse to one (shortest symbol kept); unknown kept.
     monkeypatch.setitem(

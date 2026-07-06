@@ -26,6 +26,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 _SP500_WIKI = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+_SP400_WIKI = "https://en.wikipedia.org/wiki/List_of_S%26P_400_companies"
 _NDX_WIKI = "https://en.wikipedia.org/wiki/Nasdaq-100"
 
 _CACHE: dict[str, Any] = {}
@@ -86,6 +87,62 @@ def pit_sp500(as_of: date) -> set[str]:
         if c["date"] <= as_of:
             break  # changes are newest-first; the rest are already <= as_of
         # Undo a change effective AFTER as_of.
+        if c["added"]:
+            members.discard(c["added"])  # it wasn't a member yet
+        if c["removed"]:
+            members.add(c["removed"])  # it was still a member
+    return members
+
+
+def _load_sp400() -> tuple[set[str], list[dict]]:
+    """Return (current S&P MidCap 400 tickers, change-log rows newest-first).
+
+    The S&P 400 Wikipedia page mirrors the S&P 500 page's structure: table[0] is
+    the current constituents (``Symbol`` column) and table[1] is the dated change
+    log. The change log uses a two-row (MultiIndex) header
+    ``[Date, (Added, Ticker), (Added, Security), (Removed, Ticker),
+    (Removed, Security), Reason]``, but the positional column order matches the
+    S&P 500 log, so the same positional parse applies. Dense back to 2012, so
+    reverse-application to 2019-01 is well covered.
+    """
+    if "sp400" in _CACHE:
+        return _CACHE["sp400"]
+    import pandas as pd
+
+    tables = _wiki_tables(_SP400_WIKI)
+    current = {
+        _norm(t)
+        for t in tables[0]["Symbol"].tolist()
+        if str(t).strip()
+    }
+    changes: list[dict] = []
+    chg = tables[1]
+    for _, row in chg.iterrows():
+        vals = list(row.values)
+        # positional: [eff_date, added_ticker, added_name, removed_ticker, removed_name, reason]
+        eff_raw, added, _an, removed, _rn = vals[0], vals[1], vals[2], vals[3], vals[4]
+        eff = pd.to_datetime(eff_raw, errors="coerce")
+        if pd.isna(eff):
+            continue
+        changes.append(
+            {
+                "date": eff.date(),
+                "added": _norm(added) if str(added).strip() and str(added) != "nan" else None,
+                "removed": _norm(removed) if str(removed).strip() and str(removed) != "nan" else None,
+            }
+        )
+    changes.sort(key=lambda c: c["date"], reverse=True)
+    _CACHE["sp400"] = (current, changes)
+    return current, changes
+
+
+def pit_sp400(as_of: date) -> set[str]:
+    """S&P MidCap 400 membership as of ``as_of`` (reverse-applied change log)."""
+    current, changes = _load_sp400()
+    members = set(current)
+    for c in changes:
+        if c["date"] <= as_of:
+            break  # changes are newest-first; the rest are already <= as_of
         if c["added"]:
             members.discard(c["added"])  # it wasn't a member yet
         if c["removed"]:
@@ -186,6 +243,7 @@ def pit_universe(
     as_of: date,
     *,
     include_ndx: bool = True,
+    include_sp400: bool = False,
     dedup: bool = True,
     drop_unlisted: Any = None,
 ) -> list[str]:
@@ -205,6 +263,12 @@ def pit_universe(
     are never dropped (their membership is already point-in-time). When
     ``drop_unlisted`` is None the NDX union is kept verbatim (prior behavior).
 
+    When ``include_sp400`` is set, the S&P MidCap 400 membership as of ``as_of``
+    (reconstructed point-in-time from its own Wikipedia change log) is unioned in
+    as well, expanding the large-cap universe with mid-caps. Unlike the NDX union
+    it is fully point-in-time, so it is added verbatim (no ``drop_unlisted``
+    phantom filtering needed).
+
     Same-CIK share-class duplicates are collapsed so a company is not
     double-counted. Returns sorted tickers.
 
@@ -222,6 +286,11 @@ def pit_universe(
                 t for t in ndx_only if _has_pit_listing(t, as_of, drop_unlisted)
             }
         members |= ndx_only
+    if include_sp400:
+        # S&P MidCap 400 is reconstructed point-in-time (dense Wikipedia change
+        # log), so unlike the NDX union it needs no ``drop_unlisted`` phantom
+        # guard — its members were actual constituents on ``as_of``.
+        members |= pit_sp400(as_of)
     if dedup:
         return _dedup_by_cik(members)
     return sorted(members)
