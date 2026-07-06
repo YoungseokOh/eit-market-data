@@ -24,10 +24,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import socket
 import sys
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
+
+# pykrx issues timeout-less HTTP requests; a hung KRX connection can wedge the
+# whole collapse-capture pass indefinitely. A socket-level default timeout is the
+# backstop; each per-ticker fetch is additionally guarded by a thread timeout.
+socket.setdefaulttimeout(30)
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT / "src"))
@@ -37,6 +44,29 @@ from eit_market_data.kr.market_helpers import (
     fetch_stock_ohlcv_frame,
     normalize_ticker,
 )
+
+
+_OHLCV_POOL = ThreadPoolExecutor(max_workers=2)
+
+
+def _safe_ohlcv_frame(ticker: str, start: date, end: date, timeout: float = 45.0):
+    """fetch_stock_ohlcv_frame guarded by a hard wall-clock timeout.
+
+    Returns (None, None) on timeout or any error so collapse capture skips a
+    hanging/failed ticker instead of wedging the whole run. socket.setdefaulttimeout
+    above ensures a wedged request actually raises (freeing the pool worker); the
+    future timeout is the wall-clock backstop. The pool is persistent (never
+    shut down mid-run, so a timed-out call never blocks on the abandoned worker).
+    """
+    fut = _OHLCV_POOL.submit(fetch_stock_ohlcv_frame, ticker, start, end)
+    try:
+        return fut.result(timeout=timeout)
+    except FutureTimeout:
+        print(f"[collapse] TIMEOUT {ticker} after {timeout}s; skip", flush=True)
+        return None, None
+    except Exception as exc:  # noqa: BLE001
+        print(f"[collapse] ERROR {ticker}: {exc}; skip", flush=True)
+        return None, None
 
 UNIVERSE_DIR = _REPO_ROOT / "universes" / "kr" / "top500"
 CACHE_TICKERS_JSON = Path(
@@ -124,7 +154,7 @@ def _classify_exits(
             ly, lm = (int(x) for x in rec["last"].split("-"))
             end = date(ly, lm, 28) + timedelta(days=120)
             start = date(ly, lm, 1) - timedelta(days=120)
-            df, src = fetch_stock_ohlcv_frame(t, start, min(end, today))
+            df, src = _safe_ohlcv_frame(t, start, min(end, today))
             if df is not None and not df.empty and "종가" in df.columns:
                 closes = df["종가"].dropna()
                 if len(closes) > 0:

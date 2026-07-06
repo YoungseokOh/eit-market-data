@@ -141,6 +141,7 @@ def run(args: argparse.Namespace) -> int:
     print(f"[DART] progress={args.progress}")
 
     attempted = 0
+    consecutive_empty = 0
     for ticker in tickers:
         if ticker in completed:
             continue
@@ -159,6 +160,7 @@ def run(args: argparse.Namespace) -> int:
         need_fundamental = not has_fundamental
         need_filing = not has_filing
         if not need_fundamental and not need_filing:
+            consecutive_empty = 0
             _record_once(progress, "completed", ticker)
             completed.add(ticker)
             continue
@@ -219,6 +221,7 @@ def run(args: argparse.Namespace) -> int:
                 result["filing"] = "cached"
 
             print(f"[DART] ok {result}")
+            consecutive_empty = 0
             _record_once(progress, "completed", ticker)
             completed.add(ticker)
             progress["last_ticker"] = ticker
@@ -237,6 +240,28 @@ def run(args: argparse.Namespace) -> int:
             progress["last_ticker"] = ticker
             progress["current_ticker"] = None
             if _should_stop_live(exc, filing_mode=args.filing_mode):
+                transient = _is_dart_transient_error(exc)
+                if args.continue_on_empty and not transient:
+                    # Isolated genuine no-data corp (013 / empty fundamental with a
+                    # live HTTP 200): record and skip so resume advances past it. A
+                    # *run* of consecutive empties may signal an IP throttle/block —
+                    # stop then, per .claude/rules/dart-api-limits.md.
+                    consecutive_empty += 1
+                    _record_once(progress, "empty_skipped", ticker)
+                    _record_once(progress, "completed", ticker)
+                    completed.add(ticker)
+                    progress["current_ticker"] = None
+                    _save_progress(args.progress, progress)
+                    print(f"[DART] empty-skip {ticker} consec={consecutive_empty}")
+                    if consecutive_empty >= args.max_consecutive_empty:
+                        progress["stopped"] = {"reason": "consecutive_empty",
+                                               "count": consecutive_empty, **item}
+                        _save_progress(args.progress, progress)
+                        print(f"[DART] STOP consecutive_empty={consecutive_empty} "
+                              "(possible throttle/block)")
+                        return 2
+                    time.sleep(args.delay)
+                    continue
                 progress["stopped"] = item
                 _save_progress(args.progress, progress)
                 print(f"[DART] live stop {item}")
@@ -264,6 +289,21 @@ def main() -> None:
     parser.add_argument("--delay", type=float, default=DEFAULT_DELAY_SECONDS)
     parser.add_argument("--quarters", type=int, default=8)
     parser.add_argument("--max-tickers", type=int)
+    parser.add_argument(
+        "--continue-on-empty",
+        action="store_true",
+        help=(
+            "Treat an isolated empty/013 fundamental as a genuine no-data corp: record "
+            "it (empty_skipped + completed) and continue instead of stopping. A run of "
+            "--max-consecutive-empty empties still stops (possible throttle/block)."
+        ),
+    )
+    parser.add_argument(
+        "--max-consecutive-empty",
+        type=int,
+        default=8,
+        help="With --continue-on-empty, stop after this many consecutive empties.",
+    )
     parser.add_argument(
         "--filing-mode",
         choices=sorted(FILING_MODES),
