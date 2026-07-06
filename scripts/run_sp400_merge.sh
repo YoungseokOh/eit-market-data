@@ -19,6 +19,22 @@ END_MONTH="${2:-2026-06}"
 mkdir -p logs
 LOG="logs/sp400_merge.log"
 STATUS="logs/sp400_merge.status"
+LOCK="logs/sp400_merge.lock"
+
+# Single-instance guard: if another merge is already running (e.g. an earlier
+# hourly resume that survived), exit immediately instead of racing on the same
+# snapshot.json files. Uses a lock dir (atomic mkdir) + stale-pid cleanup.
+if ! mkdir "$LOCK" 2>/dev/null; then
+  if [ -f "$LOCK/pid" ] && kill -0 "$(cat "$LOCK/pid")" 2>/dev/null; then
+    echo "already running pid=$(cat "$LOCK/pid") $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$STATUS"
+    exit 0
+  fi
+  # stale lock (holder died): reclaim it.
+  rm -rf "$LOCK"; mkdir "$LOCK"
+fi
+echo "$$" > "$LOCK/pid"
+cleanup() { rm -rf "$LOCK"; }
+trap cleanup EXIT
 
 # shellcheck disable=SC1091
 source .venv/bin/activate
