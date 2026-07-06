@@ -47,3 +47,6 @@ uv.lock
 
 # local launchd wrapper logs
 logs/
+
+# top-500 KR parallel bundle output (never commit bundles)
+artifacts_top500/

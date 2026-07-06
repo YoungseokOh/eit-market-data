@@ -23,11 +23,13 @@ INDEX_CODE_NAMES: dict[str, str] = {
     "1001": "KOSPI",
     "2001": "KOSDAQ",
     "1028": "KOSPI200",
+    "5042": "KRX300",
 }
 _INDEX_FDR_SYMBOLS: dict[str, str] = {
     "1001": "^KS11",
     "2001": "^KQ11",
     "1028": "^KS200",
+    # KRX 300 spans KOSPI+KOSDAQ; no clean public FDR symbol, pykrx-only.
 }
 CAP_MONTHLY_DIR = _PROJECT_ROOT / "data/market/cap"
 _LOCAL_CAP_MONTHLY_MAX_GAP_DAYS = 45

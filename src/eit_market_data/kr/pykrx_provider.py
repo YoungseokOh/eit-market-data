@@ -51,10 +51,14 @@ class PykrxProvider:
         self,
         fundamental_provider: Any | None = None,
         official_only: bool = True,
+        benchmark_index: str = "1001",
     ) -> None:
         self._fundamental_provider = fundamental_provider
         self._fundamental_provider_init_failed = False
         self._official_only = official_only
+        # Benchmark index code. "1001"=KOSPI (default), "5042"=KRX300 (KOSPI+KOSDAQ
+        # spanning — appropriate for a combined KOSPI+KOSDAQ universe).
+        self._benchmark_index = benchmark_index
         self._sector_cache: dict[tuple[str, str], str] = {}
         self._logged_sector_snapshots: set[tuple[str, str]] = set()
         self._semaphore = asyncio.Semaphore(2)
@@ -234,7 +238,7 @@ class PykrxProvider:
     def _fetch_benchmark_sync(self, as_of: date, lookback_days: int) -> list[PriceBar]:
         start = as_of - timedelta(days=max(int(lookback_days * 1.8), 30))
         df, _source = fetch_index_ohlcv_frame(
-            "1001",
+            self._benchmark_index,
             start,
             as_of,
             logger_=logger,

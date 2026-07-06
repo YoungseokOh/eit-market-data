@@ -51,6 +51,7 @@ async def build_snapshot(
     profile: str,
     market_subdir: str = "",
     dart_mode: str = "live",
+    benchmark_index: str = "1001",
 ) -> dict[str, object]:
     from eit_market_data.snapshot import SnapshotBuilder, SnapshotConfig, create_kr_providers
 
@@ -71,7 +72,10 @@ async def build_snapshot(
 
     builder = SnapshotBuilder(
         **create_kr_providers(
-            profile=profile, universe_csv=universe_csv, dart_override=dart_override
+            profile=profile,
+            universe_csv=universe_csv,
+            dart_override=dart_override,
+            benchmark_index=benchmark_index,
         )
     )
     snapshot = await builder.build_and_persist(
