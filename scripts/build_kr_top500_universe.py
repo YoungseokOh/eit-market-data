@@ -145,7 +145,15 @@ def _load_cached_day(market: str, d: date):
         return None
 
 
-def _compute_phase(start: str, end: str, top_n: int, window: int, stride: int) -> dict[str, Any]:
+def _compute_phase(
+    start: str,
+    end: str,
+    top_n: int,
+    window: int,
+    stride: int,
+    band_lower: int = 450,
+    band_upper: int = 600,
+) -> dict[str, Any]:
     import pandas as pd
 
     UNIVERSE_DIR.mkdir(parents=True, exist_ok=True)
@@ -215,7 +223,42 @@ def _compute_phase(start: str, end: str, top_n: int, window: int, stride: int) -
             sizes[month] = 0
             continue
 
-        df = pd.DataFrame(rows).sort_values("adv", ascending=False).head(top_n).reset_index(drop=True)
+        # Rank ALL then-listed ADV-rankable eligibles (not just top_n) so the
+        # hysteresis bands can be evaluated against the full ranking.
+        df_all = pd.DataFrame(rows).sort_values("adv", ascending=False).reset_index(drop=True)
+        df_all["full_rank"] = range(1, len(df_all) + 1)
+        rank_of = dict(zip(df_all["ticker"], df_all["full_rank"]))
+
+        if prev_set is None:
+            # Seed month 0: plain top-N by ADV.
+            selected = set(df_all["ticker"].head(top_n))
+        else:
+            # Hysteresis banding with carry-forward. RETAIN a current member while
+            # its ADV rank <= band_upper; a delisted member is absent from rank_of
+            # and therefore drops out naturally (real exit preserved, survivorship
+            # free). Then fill remaining slots up to top_n from best-ranked
+            # non-members whose rank <= band_lower.
+            retained = sorted(
+                (t for t in prev_set if rank_of.get(t, 10**9) <= band_upper),
+                key=lambda t: rank_of[t],
+            )
+            if len(retained) >= top_n:
+                selected = set(retained[:top_n])  # trim to top_n best-ranked retained
+            else:
+                need = top_n - len(retained)
+                retained_set = set(retained)
+                adds = [
+                    t
+                    for t in df_all["ticker"]  # already adv-desc ordered (best first)
+                    if t not in retained_set and rank_of[t] <= band_lower
+                ]
+                selected = set(retained) | set(adds[:need])
+
+        df = (
+            df_all[df_all["ticker"].isin(selected)]
+            .sort_values("adv", ascending=False)
+            .reset_index(drop=True)
+        )
         df["rank"] = range(1, len(df) + 1)
         df["as_of"] = anchor.isoformat()
         df = df[["ticker", "market", "name", "adv", "adv_days", "close", "market_cap", "rank", "as_of"]]
@@ -252,6 +295,10 @@ def main() -> int:
     ap.add_argument("--window", type=int, default=60, help="trailing window in business days")
     ap.add_argument("--stride", type=int, default=3, help="sample every Nth business day")
     ap.add_argument("--delay", type=float, default=0.6, help="seconds between live pykrx calls")
+    ap.add_argument("--band-lower", type=int, default=450,
+                    help="hysteresis lower band: ADD a non-member only if ADV rank <= this")
+    ap.add_argument("--band-upper", type=int, default=1000,
+                    help="hysteresis upper band: RETAIN a current member while ADV rank <= this")
     args = ap.parse_args()
 
     if args.phase in ("fetch", "both"):
@@ -261,7 +308,10 @@ def main() -> int:
         print(f"FETCH done: {stats}", flush=True)
 
     if args.phase in ("compute", "both"):
-        result = _compute_phase(args.start, args.end, args.top_n, args.window, args.stride)
+        result = _compute_phase(
+            args.start, args.end, args.top_n, args.window, args.stride,
+            band_lower=args.band_lower, band_upper=args.band_upper,
+        )
         sizes = result["sizes"]
         nonzero = [v for v in sizes.values() if v]
         print(
