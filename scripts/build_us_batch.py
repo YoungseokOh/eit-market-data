@@ -23,7 +23,14 @@ from typing import Any, Iterable, Sequence
 from io import StringIO
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _common import bootstrap, load_tickers as _load_tickers, write_json
+from _common import (
+    bootstrap,
+    last_weekday_of_month as _month_end_weekday,
+    load_tickers as _load_tickers,
+    month_range,
+    parse_month,
+    write_json,
+)
 
 # Guard against indefinite hangs on stuck yfinance/SEC sockets (no per-request
 # timeout in the providers): a stalled read raises after 90s instead of hanging
@@ -65,37 +72,11 @@ NDX_SOURCE_OFFICIAL = "official"
 logger = logging.getLogger(__name__)
 
 
-def _parse_month(value: str) -> tuple[int, int]:
-    return tuple(map(int, value.split("-")))
-
-
 def _month_range(start: str, end: str) -> list[str]:
     """Generate YYYY-MM strings from start to end (inclusive)."""
-    sy, sm = _parse_month(start)
-    ey, em = _parse_month(end)
-
-    if (ey, em) < (sy, sm):
+    if parse_month(end) < parse_month(start):
         raise ValueError("--start-month must be <= --end-month")
-
-    out = []
-    y, m = sy, sm
-    while (y, m) <= (ey, em):
-        out.append(f"{y:04d}-{m:02d}")
-        if m == 12:
-            y, m = y + 1, 1
-        else:
-            m += 1
-    return out
-
-
-def _month_end_weekday(year: int, month: int) -> date:
-    """Last weekday of the month (membership-lookup date; exact trading day not needed)."""
-    import calendar
-
-    d = date(year, month, calendar.monthrange(year, month)[1])
-    while d.weekday() >= 5:
-        d -= timedelta(days=1)
-    return d
+    return month_range(start, end)
 
 
 def _load_csv_tickers(path: Path) -> list[str]:

@@ -35,24 +35,12 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT / "src"))
 sys.path.insert(0, str(_REPO_ROOT / "scripts"))
 
+from _common import month_tuples as _iter_months
 from build_kr_snapshot import build_snapshot
 from eit_market_data.core.calendar import _last_business_day
 
 UNIVERSE_DIR = _REPO_ROOT / "universes" / "kr" / "top500"
 KRX300_INDEX = "5042"
-
-
-def _iter_months(start: str, end: str) -> list[tuple[int, int]]:
-    sy, sm = (int(x) for x in start.split("-"))
-    ey, em = (int(x) for x in end.split("-"))
-    out: list[tuple[int, int]] = []
-    y, m = sy, sm
-    while (y, m) <= (ey, em):
-        out.append((y, m))
-        m += 1
-        if m > 12:
-            m, y = 1, y + 1
-    return out
 
 
 def main() -> int:

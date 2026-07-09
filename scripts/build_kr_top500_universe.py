@@ -41,6 +41,7 @@ from typing import Any
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT / "src"))
 
+from _common import month_tuples as _iter_months
 from eit_market_data.core.calendar import _is_trading_day, _last_business_day
 from eit_market_data.kr.market_helpers import (
     fetch_market_cap_frame,
@@ -51,18 +52,6 @@ from eit_market_data.kr.market_helpers import (
 ADV_CACHE_DIR = _REPO_ROOT / "data" / "market" / "adv_cap_daily"
 UNIVERSE_DIR = _REPO_ROOT / "universes" / "kr" / "top500"
 MARKETS = ("KOSPI", "KOSDAQ")
-
-
-def _iter_months(start: str, end: str):
-    sy, sm = (int(x) for x in start.split("-"))
-    ey, em = (int(x) for x in end.split("-"))
-    y, m = sy, sm
-    while (y, m) <= (ey, em):
-        yield y, m
-        m += 1
-        if m > 12:
-            m = 1
-            y += 1
 
 
 def _business_days_back(anchor: date, n: int) -> list[date]:

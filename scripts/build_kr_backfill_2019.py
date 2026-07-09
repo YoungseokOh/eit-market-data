@@ -32,7 +32,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _common import bootstrap
+from _common import bootstrap, month_tuples as _iter_months
 
 PROJECT_ROOT = bootstrap()
 
@@ -47,19 +47,6 @@ from build_kr_snapshot import build_snapshot  # type: ignore[import-not-found]
 ARTIFACTS_ROOT = PROJECT_ROOT / "artifacts"
 UNIVERSE_DIR = PROJECT_ROOT / "universes" / "kr" / "kospi200"
 STATE_DIR = PROJECT_ROOT / "data" / "kr_backfill_2019"
-
-
-def _iter_months(start: str, end: str) -> list[tuple[int, int]]:
-    sy, sm = int(start[:4]), int(start[5:7])
-    ey, em = int(end[:4]), int(end[5:7])
-    out: list[tuple[int, int]] = []
-    y, m = sy, sm
-    while (y, m) <= (ey, em):
-        out.append((y, m))
-        m += 1
-        if m > 12:
-            y, m = y + 1, 1
-    return out
 
 
 def _prev_month_csv(year: int, month: int) -> Path:

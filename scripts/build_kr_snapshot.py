@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _common import bootstrap
+from _common import bootstrap, last_weekday_of_month as _last_business_day
 
 PROJECT_ROOT = bootstrap()
 
@@ -28,16 +28,6 @@ def load_universe_tickers(path: Path) -> list[str]:
             for row in reader
             if row.get("ticker") and str(row["ticker"]).strip()
         ]
-
-
-def _last_business_day(year: int, month: int) -> date:
-    if month == 12:
-        last = date(year + 1, 1, 1) - timedelta(days=1)
-    else:
-        last = date(year, month + 1, 1) - timedelta(days=1)
-    while last.weekday() >= 5:
-        last -= timedelta(days=1)
-    return last
 
 
 def should_build_monthly_snapshot(as_of: date) -> bool:

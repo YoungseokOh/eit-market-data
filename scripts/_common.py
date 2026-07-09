@@ -22,6 +22,7 @@ from __future__ import annotations
 import csv
 import json
 import sys
+from datetime import date, timedelta
 from pathlib import Path
 
 
@@ -113,6 +114,27 @@ def month_range(start: str, end: str) -> list[str]:
         else:
             m += 1
     return months
+
+
+def month_tuples(start: str, end: str) -> list[tuple[int, int]]:
+    """Generate ``(year, month)`` tuples from *start* to *end* inclusive."""
+    return [parse_month(label) for label in month_range(start, end)]
+
+
+def last_weekday_of_month(year: int, month: int) -> date:
+    """Last calendar weekday (Mon-Fri) of the month.
+
+    NOT holiday-aware — use :func:`eit_market_data.core.calendar._last_business_day`
+    when the exact exchange trading day matters. This matches the weekend-only
+    helper the collection scripts have always used for membership-lookup dates.
+    """
+    if month == 12:
+        last = date(year + 1, 1, 1) - timedelta(days=1)
+    else:
+        last = date(year, month + 1, 1) - timedelta(days=1)
+    while last.weekday() >= 5:
+        last -= timedelta(days=1)
+    return last
 
 
 def next_month(month: str) -> str:

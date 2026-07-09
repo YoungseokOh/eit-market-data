@@ -11,6 +11,8 @@ import re
 from datetime import date
 from typing import Any
 
+from eit_market_data.kr.market_helpers import date_to_yyyymmdd
+
 _ACCOUNT_MAP: dict[str, list[str]] = {
     "revenue": ["매출액", "영업수익"],
     "operating_income": ["영업이익", "영업이익(손실)"],
@@ -57,7 +59,7 @@ _EPS_FIELDS = {"eps"}
 
 
 def _date_to_yyyymmdd(value: date) -> str:
-    return value.strftime("%Y%m%d")
+    return date_to_yyyymmdd(value)
 
 
 def _parse_date_yyyymmdd(raw: Any) -> date | None:
