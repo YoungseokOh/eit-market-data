@@ -28,6 +28,8 @@ def _args(tmp_path, *, filing_mode: str = "optional") -> SimpleNamespace:
         delay=0.0,
         quarters=1,
         max_tickers=None,
+        continue_on_empty=False,
+        max_consecutive_empty=8,
         filing_mode=filing_mode,
     )
 

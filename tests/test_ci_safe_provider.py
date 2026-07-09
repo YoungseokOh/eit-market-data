@@ -35,8 +35,9 @@ def test_create_kr_providers_ci_safe_uses_seed_sector(tmp_path: Path, monkeypatc
 
 def test_create_kr_providers_official_falls_back_without_dart_and_ecos(monkeypatch) -> None:
     class DummyPykrxProvider:
-        def __init__(self, official_only=True) -> None:
+        def __init__(self, official_only=True, benchmark_index="1001") -> None:
             self.official_only = official_only
+            self.benchmark_index = benchmark_index
             self._fundamental_provider = None
 
     monkeypatch.setattr(
