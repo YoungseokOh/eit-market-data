@@ -113,13 +113,13 @@ def test_run_kr_phase_uses_official_pykrx_raw_crawler(monkeypatch, tmp_path: Pat
             _ = (universe_csv, resume)
             return {"summary_path": "summary.json"}
 
-    monkeypatch.setattr(local_collection, "run_subprocess_stage", fake_run_subprocess_stage)
+    monkeypatch.setattr(local_collection.runner, "run_subprocess_stage", fake_run_subprocess_stage)
     monkeypatch.setattr(
-        local_collection,
+        local_collection.runner,
         "validate_kr_raw_outputs",
         lambda raw_root: [ValidationCheck("cap_daily", "ok", str(raw_root))],
     )
-    monkeypatch.setattr(local_collection, "LocalKrCollector", DummyCollector)
+    monkeypatch.setattr(local_collection.runner, "LocalKrCollector", DummyCollector)
 
     run_root = tmp_path / "run"
     universe_csv = tmp_path / "universe.csv"
@@ -173,16 +173,16 @@ def test_local_kr_collector_keeps_inter_ticker_delay_for_live_dart(
     # configured inter-ticker delay.
     from types import SimpleNamespace
 
-    monkeypatch.setattr(local_collection, "DartProvider", lambda **kwargs: object())
+    monkeypatch.setattr(local_collection.collector, "DartProvider", lambda **kwargs: object())
     monkeypatch.setattr(
-        local_collection, "PykrxProvider", lambda **kwargs: SimpleNamespace()
+        local_collection.collector, "PykrxProvider", lambda **kwargs: SimpleNamespace()
     )
     monkeypatch.setattr(
-        local_collection,
+        local_collection.collector,
         "CompositeKrFundamentalProvider",
         lambda **kwargs: object(),
     )
-    monkeypatch.setattr(local_collection, "EcosMacroProvider", lambda: object())
+    monkeypatch.setattr(local_collection.collector, "EcosMacroProvider", lambda: object())
     collector = local_collection.LocalKrCollector(
         as_of=date(2026, 5, 4),
         storage_root=tmp_path,
@@ -383,9 +383,9 @@ def test_is_sorted_dates_accepts_both_directions() -> None:
 
 
 def test_build_local_universe_manifest_top_kind_keeps_market_cap(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr("eit_market_data.local_collection.PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr("eit_market_data.local_collection.universe.PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(
-        "eit_market_data.local_collection._listing_metadata_frame",
+        "eit_market_data.local_collection.universe._listing_metadata_frame",
         lambda: pd.DataFrame(
             [
                 {"ticker": "005930", "name": "삼성전자", "market": "KOSPI", "sector": "IT"},
@@ -405,7 +405,7 @@ def test_build_local_universe_manifest_top_kind_keeps_market_cap(monkeypatch, tm
             )
         return pd.DataFrame(columns=["종목코드", "시가총액"])
 
-    monkeypatch.setattr("eit_market_data.local_collection.fetch_market_cap_frame", fake_cap_frame)
+    monkeypatch.setattr("eit_market_data.local_collection.universe.fetch_market_cap_frame", fake_cap_frame)
 
     output_path = tmp_path / "top100.csv"
     build_local_universe_manifest(
@@ -424,9 +424,9 @@ def test_build_local_universe_manifest_uses_snapshot_market_cap_fallback(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr("eit_market_data.local_collection.PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr("eit_market_data.local_collection.universe.PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(
-        "eit_market_data.local_collection._listing_metadata_frame",
+        "eit_market_data.local_collection.universe._listing_metadata_frame",
         lambda: pd.DataFrame(
             [
                 {"ticker": "005930", "name": "삼성전자", "market": "KOSPI", "sector": "IT"},
@@ -461,7 +461,7 @@ def test_build_local_universe_manifest_uses_snapshot_market_cap_fallback(
         encoding="utf-8",
     )
 
-    monkeypatch.setattr("eit_market_data.local_collection.fetch_market_cap_frame", fake_cap_frame)
+    monkeypatch.setattr("eit_market_data.local_collection.universe.fetch_market_cap_frame", fake_cap_frame)
 
     output_path = tmp_path / "top200.csv"
     build_local_universe_manifest(
@@ -480,7 +480,7 @@ def test_build_local_universe_manifest_kospi200_uses_official_order(
     tmp_path: Path,
 ) -> None:
     monkeypatch.setattr(
-        "eit_market_data.local_collection._listing_metadata_frame",
+        "eit_market_data.local_collection.universe._listing_metadata_frame",
         lambda: pd.DataFrame(
             [
                 {"ticker": "005930", "name": "삼성전자", "market": "KOSPI", "sector": "IT"},
@@ -490,7 +490,7 @@ def test_build_local_universe_manifest_kospi200_uses_official_order(
     )
     tickers = ["005930", "0126Z0"] + [f"{idx:06d}" for idx in range(1, 199)]
     monkeypatch.setattr(
-        "eit_market_data.local_collection._fetch_kospi200_tickers_from_pykrx",
+        "eit_market_data.local_collection.universe._fetch_kospi200_tickers_from_pykrx",
         lambda as_of: tickers,
     )
 
@@ -505,7 +505,7 @@ def test_build_local_universe_manifest_kospi200_uses_official_order(
             }
         )
 
-    monkeypatch.setattr("eit_market_data.local_collection.fetch_market_cap_frame", fake_cap_frame)
+    monkeypatch.setattr("eit_market_data.local_collection.universe.fetch_market_cap_frame", fake_cap_frame)
 
     output_path = tmp_path / "kospi200.csv"
     build_local_universe_manifest(
@@ -527,11 +527,11 @@ def test_build_local_universe_manifest_kospi200_falls_back_to_naver_current(
     tmp_path: Path,
 ) -> None:
     monkeypatch.setattr(
-        "eit_market_data.local_collection._listing_metadata_frame",
+        "eit_market_data.local_collection.universe._listing_metadata_frame",
         lambda: pd.DataFrame(columns=["ticker", "name", "market", "sector"]),
     )
     monkeypatch.setattr(
-        "eit_market_data.local_collection._fetch_kospi200_tickers_from_pykrx",
+        "eit_market_data.local_collection.universe._fetch_kospi200_tickers_from_pykrx",
         lambda as_of: [],
     )
     rows = [{"ticker": "0126Z0", "name": "삼성에피스홀딩스"}] + [
@@ -539,11 +539,11 @@ def test_build_local_universe_manifest_kospi200_falls_back_to_naver_current(
         for idx in range(1, 200)
     ]
     monkeypatch.setattr(
-        "eit_market_data.local_collection._fetch_kospi200_rows_from_naver_current",
+        "eit_market_data.local_collection.universe._fetch_kospi200_rows_from_naver_current",
         lambda: rows,
     )
     monkeypatch.setattr(
-        "eit_market_data.local_collection.fetch_market_cap_frame",
+        "eit_market_data.local_collection.universe.fetch_market_cap_frame",
         lambda as_of, market: pd.DataFrame(columns=["종목코드", "시가총액"]),
     )
 
@@ -569,15 +569,15 @@ def test_build_local_universe_manifest_kospi200_historical_no_prev_refuses_naver
     tmp_path: Path,
 ) -> None:
     monkeypatch.setattr(
-        "eit_market_data.local_collection._listing_metadata_frame",
+        "eit_market_data.local_collection.universe._listing_metadata_frame",
         lambda: pd.DataFrame(columns=["ticker", "name", "market", "sector"]),
     )
     monkeypatch.setattr(
-        "eit_market_data.local_collection._fetch_kospi200_tickers_from_pykrx",
+        "eit_market_data.local_collection.universe._fetch_kospi200_tickers_from_pykrx",
         lambda as_of: [],
     )
     monkeypatch.setattr(
-        "eit_market_data.local_collection._fetch_kospi200_rows_from_naver_current",
+        "eit_market_data.local_collection.universe._fetch_kospi200_rows_from_naver_current",
         lambda: [{"ticker": f"{idx:06d}", "name": f"name-{idx}"} for idx in range(1, 201)],
     )
 
@@ -597,17 +597,17 @@ def test_build_local_universe_manifest_kospi200_offcycle_churn_carries_forward(
 ) -> None:
     base = [f"{idx:06d}" for idx in range(1, 201)]
     monkeypatch.setattr(
-        "eit_market_data.local_collection._listing_metadata_frame",
+        "eit_market_data.local_collection.universe._listing_metadata_frame",
         lambda: pd.DataFrame(columns=["ticker", "name", "market", "sector"]),
     )
     monkeypatch.setattr(
-        "eit_market_data.local_collection.fetch_market_cap_frame",
+        "eit_market_data.local_collection.universe.fetch_market_cap_frame",
         lambda as_of, market: pd.DataFrame(columns=["종목코드", "시가총액"]),
     )
     # Off-cycle (September) pykrx list swaps 19 names vs the prior month.
     suspect = base[:181] + [f"9{idx:05d}" for idx in range(19)]
     monkeypatch.setattr(
-        "eit_market_data.local_collection._fetch_kospi200_tickers_from_pykrx",
+        "eit_market_data.local_collection.universe._fetch_kospi200_tickers_from_pykrx",
         lambda as_of: suspect,
     )
     previous_members = [{"ticker": t, "name": f"name-{t}"} for t in base]
