@@ -145,7 +145,13 @@ eit-market-data/
 │   ├── edgar_provider.py         # US 공시 (SEC EDGAR)
 │   ├── edgar_xbrl_provider.py    # US 펀더멘털 (SEC XBRL companyfacts, PIT 분기 분해)
 │   ├── us_universe.py            # US 유니버스 해석 (S&P500/NASDAQ100 PIT)
-│   ├── local_collection.py       # 로컬 수집 오케스트레이션 (LocalKrCollector 등)
+│   ├── local_collection/         # 로컬 수집 오케스트레이션 패키지
+│   │   ├── __init__.py           #   (기존 local_collection.py 심볼 전부 재노출)
+│   │   ├── cache_only_dart.py    #   CacheOnlyDartProvider (캐시 전용 DART)
+│   │   ├── collector.py          #   LocalKrCollector
+│   │   ├── universe.py           #   KOSPI200/topN 유니버스 매니페스트
+│   │   ├── validation.py         #   체크포인트/최종 스냅샷 검증
+│   │   └── runner.py             #   run_local_collection 오케스트레이션
 │   ├── io/                       # 스냅샷 번들 → 온디스크 아티팩트 I/O
 │   │   ├── __init__.py
 │   │   └── daily_prices.py       # 일별 OHLCV price store 빌더 (CSV consumer contract)
@@ -157,6 +163,8 @@ eit-market-data/
 │   ├── pykrx_provider.py         # 가격/섹터/벤치마크 (pykrx)
 │   ├── pykrx_loader.py           # pykrx stock 모듈 lazy 로더
 │   ├── dart_provider.py          # 재무제표/공시 (opendartreader, DART_API_KEY)
+│   ├── dart_parsing.py           # DART 금액/분기/report-list 파싱 헬퍼 (pure)
+│   ├── dart_document.py          # 사업보고서 섹션 추출/리스크 검증 (pure)
 │   ├── fundamental_provider.py   # CompositeKrFundamentalProvider (DART+pykrx 합성)
 │   ├── ci_safe_provider.py       # ci_safe 프로파일 프로바이더 (API 키 불필요)
 │   ├── market_helpers.py         # 시가총액/거래일 등 KRX 시장 헬퍼
@@ -165,7 +173,8 @@ eit-market-data/
 │   ├── krx_auth.py               # KRX 인증/세션 복구
 │   └── ecos_provider.py          # 매크로 (한국은행 ECOS API, ECOS_API_KEY)
 │
-├── scripts/                      # 데이터 수집 실행 스크립트
+├── scripts/                      # 데이터 수집 실행 스크립트 (_common.py에 공용 헬퍼)
+│   └── archive/                  # 완료된 일회성 패치/백필 스크립트 보관
 ├── docs/                         # 문서
 ├── universes/                    # 유니버스 CSV 파일 (버전 관리)
 │   └── kr_universe.csv           # KR 유니버스 35종목
