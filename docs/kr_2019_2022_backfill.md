@@ -2,14 +2,14 @@
 
 Extends the KR monthly snapshot bundles back from 2023-01 to cover
 **2019-01 .. 2022-12 (48 months)**, using the same proven offline method as the
-2023-2025 backfill. Built with `scripts/build_kr_backfill_2019.py` (holiday-aware
+2023-2025 backfill. Built with `scripts/archive/build_kr_backfill_2019.py` (holiday-aware
 XKRX decision date, PIT KOSPI200 membership, DART served `cache_only`).
 
 ## Method (no broad live DART — see `.claude/rules/dart-api-limits.md`)
 
 - **Fundamentals**: re-derived OFFLINE from the raw `finstate:` disk cache
   (years 2015-2022) and re-bucketed to an early anchor
-  `fundamental:<ticker>:201901` via `scripts/rebucket_dart_fundamentals_2019.py`.
+  `fundamental:<ticker>:201901` via `scripts/archive/rebucket_dart_fundamentals_2019.py`.
   `CacheOnlyDartProvider._lookup` serves the latest bucket `<= as_of` month, so a
   2019-2022 `as_of` now resolves the 201901 anchor; the per-record PIT guard
   (`report_date <= as_of`) does the real filtering. 208 tickers anchored, span
