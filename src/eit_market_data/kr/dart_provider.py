@@ -1,16 +1,46 @@
-"""OpenDartReader-based Korean fundamentals and filing provider."""
+"""OpenDartReader-based Korean fundamentals and filing provider.
+
+Parsing/normalization helpers live in :mod:`eit_market_data.kr.dart_parsing`
+and document/section extraction in :mod:`eit_market_data.kr.dart_document`;
+both are re-exported here for backward compatibility.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
-import re
 from datetime import date
 from pathlib import Path
 from typing import Any
 
 from eit_market_data.core.pit import is_visible
+from eit_market_data.kr.dart_document import (  # noqa: F401 - re-exported for backward compat
+    _SECTION_PATTERNS,
+    _clean_document_text,
+    _extract_issued_shares_from_document,
+    _extract_sections,
+    _is_toc_chunk,
+    _looks_like_risk_text,
+    _parse_share_count,
+)
+from eit_market_data.kr.dart_parsing import (  # noqa: F401 - re-exported for backward compat
+    _ACCOUNT_MAP,
+    _EPS_FIELDS,
+    _FLOW_FIELDS,
+    _REPORT_CODE_TO_QUARTER,
+    _date_to_yyyymmdd,
+    _fiscal_year_from_report_nm,
+    _normalize_quarter_values,
+    _parse_amount_to_krw,
+    _parse_date_yyyymmdd,
+    _parse_eps,
+    _parse_report_nm,
+    _previous_cumulative_quarter,
+    _quarter_sort_key,
+    _report_entries_from_list,
+    _round_quarter_value,
+)
 from eit_market_data.kr.market_helpers import normalize_ticker
 from eit_market_data.schemas.snapshot import FilingData, FundamentalData, QuarterlyFinancials
 
@@ -30,487 +60,9 @@ _FINSTATE_TTL = 120 * 86_400   # quarterly statements are final once filed
 _REPORT_LIST_TTL = 30 * 86_400  # new filings may appear; refresh monthly
 _DOC_TTL = 365 * 86_400        # documents never change after filing
 
-_ACCOUNT_MAP: dict[str, list[str]] = {
-    "revenue": ["매출액", "영업수익"],
-    "operating_income": ["영업이익", "영업이익(손실)"],
-    "net_income": ["당기순이익", "당기순이익(손실)", "분기순이익", "반기순이익"],
-    "total_assets": ["자산총계"],
-    "total_liabilities": ["부채총계"],
-    "total_equity": ["자본총계"],
-    "current_assets": ["유동자산"],
-    "current_liabilities": ["유동부채"],
-    "gross_profit": ["매출총이익", "매출총손익"],
-    "total_debt": ["차입금합계", "총차입금", "단기차입금", "차입금", "금융부채", "사채 및 차입금"],
-    "eps": ["주당순이익", "주당이익", "기본주당이익"],
-    "interest_expense": ["이자비용"],
-    "operating_cash_flow": ["영업활동현금흐름", "영업활동으로 인한 현금흐름"],
-    "capital_expenditure": ["유형자산의취득", "유형자산취득"],
-    "cost_of_goods_sold": ["매출원가"],
-    "cash_and_equivalents": ["현금및현금성자산", "현금 및 현금성자산"],
-    "inventory": ["재고자산"],
-    "accounts_receivable": ["매출채권", "매출채권 및 기타채권"],
-}
-
-_SECTION_PATTERNS: dict[str, list[str]] = {
-    "business_overview": [
-        r"사업의\s*내용",
-        r"회사의\s*개요",
-    ],
-    "risks": [
-        r"위험\s*요소",
-        r"리스크\s*요인",
-        r"투자\s*위험\s*요소",
-        r"위험관리\s*및\s*파생거래",
-        r"재무위험관리정책",
-    ],
-    "mda": [
-        r"재무상태\s*및\s*영업실적",
-        r"경영진의\s*논의",
-        r"MD&A",
-    ],
-}
-
-_REPORT_CODE_TO_QUARTER: dict[str, str] = {
-    "11013": "Q1",
-    "11012": "Q2",
-    "11014": "Q3",
-    "11011": "Q4",
-}
-
-_FLOW_FIELDS = {
-    "revenue",
-    "operating_income",
-    "net_income",
-    "gross_profit",
-    "eps",
-    "interest_expense",
-    "operating_cash_flow",
-    "capital_expenditure",
-    "cost_of_goods_sold",
-    "ebitda",
-    "free_cash_flow",
-}
-
-_EPS_FIELDS = {"eps"}
-
 
 def _normalize_ticker(ticker: str) -> str:
     return normalize_ticker(ticker)
-
-
-def _date_to_yyyymmdd(value: date) -> str:
-    return value.strftime("%Y%m%d")
-
-
-def _parse_date_yyyymmdd(raw: Any) -> date | None:
-    try:
-        text = str(raw).strip()
-        if len(text) != 8 or not text.isdigit():
-            return None
-        return date(int(text[:4]), int(text[4:6]), int(text[6:8]))
-    except Exception:
-        return None
-
-
-def _parse_amount_to_krw(raw: Any) -> float | None:
-    """Parse a DART financial-statement amount to raw KRW (won).
-
-    DART ``thstrm_amount`` / ``thstrm_add_amount`` are reported in full KRW
-    (won). We preserve that native magnitude so aggregate fundamentals share the
-    same unit as ``market_cap`` (raw won, via ``market_helpers`` 시가총액) and as
-    the US bundle (raw USD via ``edgar_xbrl_provider``). This keeps the
-    consumer's cross-market ratios unit-correct without per-market scaling:
-    ``net_income * 4 / market_cap`` (earnings yield), ROA, ROE, and
-    ``market_cap / total_equity`` (P/B) all become unitless and realistic.
-
-    NOTE: a prior version divided by 1000 here (despite the ``_to_million``
-    name), silently storing KRW *thousands* — 1000x smaller than ``market_cap``
-    (raw won). That uniform scale error preserved ranking but made absolute
-    yields 1000x off.
-    """
-    if raw is None:
-        return None
-    text = str(raw).strip()
-    if not text or text in {"-", "N/A", "nan", "None"}:
-        return None
-    text = text.replace(",", "").replace(" ", "")
-    negative = False
-    if text.startswith("(") and text.endswith(")"):
-        negative = True
-        text = text[1:-1]
-    try:
-        value = float(text)
-    except ValueError:
-        return None
-    if negative:
-        value = -value
-    return round(value, 1)
-
-
-def _parse_eps(raw: Any) -> float | None:
-    """Parse DART EPS value in native KRW per share (no unit conversion)."""
-    if raw is None:
-        return None
-    text = str(raw).strip()
-    if not text or text in {"-", "N/A", "nan", "None"}:
-        return None
-    text = text.replace(",", "").replace(" ", "")
-    negative = False
-    if text.startswith("(") and text.endswith(")"):
-        negative = True
-        text = text[1:-1]
-    try:
-        value = float(text)
-    except ValueError:
-        return None
-    if negative:
-        value = -value
-    return round(value, 2)
-
-
-def _clean_document_text(raw: str) -> str:
-    text = re.sub(r"<[^>]+>", "\n", raw)
-    text = text.replace("&nbsp;", " ").replace("&#160;", " ").replace("&amp;", "&")
-    text = text.replace("\r", "\n")
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    text = re.sub(r"[ \t]+", " ", text)
-    return text.strip()
-
-
-# ---------------------------------------------------------------------------
-# Risk-content validator (KR)
-#
-# 사업보고서 has no single guaranteed "투자위험요소" section, so the risk patterns
-# can latch onto non-risk prose that happens to sit near a 위험-keyword: product
-# marketing copy (양산/제품 스펙), a credit-rating legend (등급정의/원리금 채무불이행
-# table), or a cross-reference stub ("...참고하시기 바랍니다"). Emitting any of
-# those as ``risks`` creates a false filing-diff signal. This validator decides
-# whether an extracted body is genuine risk-factor / 재무위험관리 prose; the caller
-# drops it (→ None) otherwise. "Better empty than wrong".
-# ---------------------------------------------------------------------------
-
-_KR_RISK_RE = re.compile(
-    r"위험|악영향|부정적|손실|노출|불확실|하락|감소할|미칠\s*수\s*있|리스크"
-)
-# Credit-rating legend signals (a rating-scale table, not risk prose).
-_KR_RATING_RE = re.compile(
-    r"등급정의|등급의\s*정의|원리금의?\s*(?:상환|채무불이행)|신용평가사|기업어음의?\s*등급"
-)
-# Product-marketing / spec-sheet signals.
-_KR_MARKETING_RE = re.compile(
-    r"양산|출시|나노|소비\s*전력|읽기\s*속도|데이터\s*전송|인치|픽셀|화소|Gbps|GB|TB"
-)
-
-
-def _looks_like_risk_text(text: str | None) -> bool:
-    """True if ``text`` reads as genuine KR 위험요소 / 재무위험관리 prose.
-
-    Rejects credit-rating legends, product-marketing copy, cross-reference
-    stubs, and bodies too short or too sparse in risk language. 재무위험관리정책 /
-    시장위험 financial-risk-management notes are accepted (they carry dense 위험
-    vocabulary); marketing spec copy and rating tables are not.
-    """
-    if not text:
-        return False
-    joined = re.sub(r"\s+", " ", text).strip()
-    if len(joined) < 200:
-        return False
-    head = joined[:1500]
-    # Credit-rating legend (rating-definition vocabulary clustered up front).
-    if len(_KR_RATING_RE.findall(head)) >= 2:
-        return False
-    risk_hits = len(_KR_RISK_RE.findall(head))
-    marketing_hits = len(_KR_MARKETING_RE.findall(head))
-    # Marketing / spec copy: many product terms, little risk language.
-    if marketing_hits >= 3 and risk_hits < 8:
-        return False
-    if risk_hits < 5:
-        return False
-    return True
-
-
-def _is_toc_chunk(chunk: str) -> bool:
-    """Heuristic: a table-of-contents entry, not a real section body.
-
-    DART 사업보고서 ToC lines use dotted/dashed page leaders (``------ 39``)
-    near the start of the chunk, whereas a real section body opens with prose.
-    """
-    head = chunk[:400]
-    return bool(re.search(r"-{5,}", head)) or bool(re.search(r"\.{5,}", head))
-
-
-def _extract_sections(
-    doc_text: str, max_chars: int = 8000, min_body: int = 60
-) -> dict[str, str]:
-    """Extract 사업보고서 sections, skipping table-of-contents header hits.
-
-    Every section header (across all section patterns) is collected as a
-    boundary. For each section we iterate its header matches newest-found-first
-    and pick the first whose following body is substantial (``>= min_body``) and
-    is not a ToC stub. The body runs from the chosen header to the next header of
-    *any other* section (capped at ``max_chars``). This lets the risk section be
-    recovered from older reports where the only risk discussion lives under a
-    deep ``5. 위험관리 및 파생거래`` heading that follows a ToC entry of the same name.
-    """
-    plain = _clean_document_text(doc_text)
-
-    # Collect header start positions per section.
-    section_matches: dict[str, list[re.Match[str]]] = {}
-    for section_name, patterns in _SECTION_PATTERNS.items():
-        found: list[re.Match[str]] = []
-        for pattern in patterns:
-            found.extend(re.finditer(pattern, plain, flags=re.IGNORECASE))
-        found.sort(key=lambda m: m.start())
-        section_matches[section_name] = found
-
-    extracted: dict[str, str] = {}
-    for section_name, matches in section_matches.items():
-        # Boundaries are headers of *other* sections only, so dense repeats of a
-        # section's own keyword (e.g. multiple 재무위험관리정책 hits) don't truncate it.
-        other_starts = sorted(
-            m.start()
-            for name, ms in section_matches.items()
-            if name != section_name
-            for m in ms
-        )
-        # For the risk section, collect *all* substantive non-ToC candidate
-        # bodies that pass the content validator and pick the one with the
-        # highest risk-language density (a dedicated 위험요소 / 시장위험 section beats
-        # a thin financial-risk note). If none pass, leave ``risks`` unset (None)
-        # rather than emit marketing copy or a rating legend.
-        risk_candidates: list[tuple[int, int, str]] = []
-        for m in matches:
-            body_start = m.end()
-            end = len(plain)
-            for s in other_starts:
-                if s >= body_start:
-                    end = s
-                    break
-            if end <= body_start:
-                end = min(body_start + max_chars, len(plain))
-            chunk = plain[body_start:end].strip()
-            if len(chunk) > max_chars:
-                chunk = chunk[:max_chars]
-            if len(chunk) < min_body or _is_toc_chunk(chunk):
-                continue
-            if section_name == "risks":
-                if not _looks_like_risk_text(chunk):
-                    continue
-                density = len(_KR_RISK_RE.findall(chunk[:2000]))
-                risk_candidates.append((density, -body_start, chunk))
-                continue
-            extracted[section_name] = chunk
-            break
-
-        if section_name == "risks" and risk_candidates:
-            # Highest density wins; tie-break on earliest occurrence.
-            risk_candidates.sort(key=lambda c: (c[0], c[1]), reverse=True)
-            extracted["risks"] = risk_candidates[0][2]
-
-    return extracted
-
-
-def _fiscal_year_from_report_nm(report_nm: str, filing_date: date | None) -> int | None:
-    """Derive the reported fiscal year from a report name like ``사업보고서 (2023.12)``.
-
-    Falls back to ``filing_date.year - 1`` (annual reports are filed the year
-    after the fiscal year they cover).
-    """
-    m = re.search(r"\((\d{4})", report_nm or "")
-    if m:
-        return int(m.group(1))
-    if filing_date is not None:
-        return filing_date.year - 1
-    return None
-
-
-def _parse_share_count(raw: str) -> float | None:
-    text = raw.strip().replace(",", "")
-    if not text or not text.isdigit():
-        return None
-    value = float(text)
-    return value if value > 0 else None
-
-
-def _extract_issued_shares_from_document(doc_text: str) -> float | None:
-    """Extract common issued shares from DART's share-count table."""
-    plain = _clean_document_text(doc_text)
-    starts: list[int] = []
-    for marker in ("주식의 총수 현황", "4. 주식의 총수 등", "주식의 총수 등"):
-        offset = 0
-        while True:
-            found = plain.find(marker, offset)
-            if found < 0:
-                break
-            starts.append(found)
-            offset = found + len(marker)
-
-    if not starts:
-        starts = [0]
-
-    patterns = (
-        r"발행주식의\s*총수\s*\([^)]*\)\s*\n+\s*([0-9][0-9,]+)",
-        r"발행주식총수\s*\n+\s*([0-9][0-9,]+)",
-    )
-    for start in sorted(set(starts)):
-        chunk = plain[start : start + 8000]
-        for pattern in patterns:
-            match = re.search(pattern, chunk)
-            if match is None:
-                continue
-            parsed = _parse_share_count(match.group(1))
-            if parsed is not None:
-                return parsed
-    return None
-
-
-def _quarter_sort_key(fiscal_quarter: str) -> tuple[int, int]:
-    year = int(fiscal_quarter[:4])
-    quarter_num = int(fiscal_quarter[-1])
-    return year, quarter_num
-
-
-def _previous_cumulative_quarter(fiscal_quarter: str) -> str | None:
-    year = int(fiscal_quarter[:4])
-    quarter = fiscal_quarter[-2:]
-    if quarter == "Q1":
-        return None
-    if quarter == "Q2":
-        return f"{year}Q1"
-    if quarter == "Q3":
-        return f"{year}Q2"
-    if quarter == "Q4":
-        return f"{year}Q3"
-    return None
-
-
-def _round_quarter_value(field: str, value: float) -> float:
-    return round(value, 2 if field in _EPS_FIELDS else 1)
-
-
-def _normalize_quarter_values(
-    fiscal_quarter: str,
-    raw_values: dict[str, float | None],
-    raw_quarter_map: dict[str, dict[str, float | None]],
-) -> dict[str, float | None]:
-    normalized = dict(raw_values)
-    previous_quarter = _previous_cumulative_quarter(fiscal_quarter)
-    for field in _FLOW_FIELDS:
-        current = raw_values.get(field)
-        if fiscal_quarter.endswith("Q1") or current is None:
-            normalized[field] = current
-            continue
-
-        if previous_quarter is None:
-            normalized[field] = current
-            continue
-
-        previous = raw_quarter_map.get(previous_quarter, {}).get(field)
-        if previous is None:
-            normalized[field] = None
-            continue
-
-        normalized[field] = _round_quarter_value(field, current - previous)
-    return normalized
-
-
-def _parse_report_nm(report_nm: str) -> tuple[str, str] | None:
-    """Parse DART report name to extract year and report code.
-
-    Examples:
-        '분기보고서 (2025.09)' → ('2025', '11014')  # Q3
-        '반기보고서 (2025.06)' → ('2025', '11012')  # Q2
-        '분기보고서 (2025.03)' → ('2025', '11013')  # Q1
-        '사업보고서 (2024.12)' → ('2024', '11011')  # Q4
-    """
-    if not report_nm:
-        return None
-
-    # Extract year and month from report_nm: "보고서명 (YYYY.MM)"
-    match = re.search(r"\((\d{4})\.(\d{2})\)", report_nm)
-    if not match:
-        return None
-
-    year = match.group(1)
-    month = match.group(2)
-
-    # Map month to report code
-    month_to_code = {
-        "03": "11013",  # Q1
-        "06": "11012",  # Q2 or H1
-        "09": "11014",  # Q3
-        "12": "11011",  # Q4 or annual
-    }
-
-    reprt_code = month_to_code.get(month)
-    if reprt_code is None:
-        return None
-
-    return year, reprt_code
-
-
-def _report_entries_from_list(report_list: Any, as_of: date) -> list[dict[str, Any]]:
-    """Extract report entries from OpenDartReader list() response.
-
-    Handles both old-style (with reprt_code, bsns_year columns) and new-style
-    (with report_nm field) API responses.
-    """
-    if report_list is None or report_list.empty:
-        return []
-
-    reports = report_list.copy()
-    if "rcept_dt" in reports.columns:
-        reports = reports.loc[
-            reports["rcept_dt"].fillna("").astype(str) <= _date_to_yyyymmdd(as_of)
-        ]
-    if reports.empty:
-        return []
-
-    entries_by_key: dict[tuple[str, str], dict[str, Any]] = {}
-
-    # Check if old-style columns exist (reprt_code, bsns_year)
-    has_old_style = "reprt_code" in reports.columns and "bsns_year" in reports.columns
-
-    for _, row in reports.iterrows():
-        report_date = _parse_date_yyyymmdd(row.get("rcept_dt"))
-        rcept_no = str(row.get("rcept_no", "")).strip()
-
-        if report_date is None or not rcept_no:
-            continue
-
-        # Try old-style parsing first
-        if has_old_style:
-            reprt_code = str(row.get("reprt_code", "")).strip()
-            bsns_year = str(row.get("bsns_year", "")).strip()
-            if not reprt_code or not bsns_year.isdigit():
-                continue
-        else:
-            # New-style parsing from report_nm
-            report_nm = str(row.get("report_nm", "")).strip()
-            parsed = _parse_report_nm(report_nm)
-            if parsed is None:
-                continue
-            bsns_year, reprt_code = parsed
-
-        quarter_label = _REPORT_CODE_TO_QUARTER.get(reprt_code)
-        if quarter_label is None:
-            continue
-
-        key = (bsns_year, reprt_code)
-        current = entries_by_key.get(key)
-        entry = {
-            "fiscal_quarter": f"{bsns_year}{quarter_label}",
-            "report_date": report_date,
-            "bsns_year": bsns_year,
-            "reprt_code": reprt_code,
-            "rcept_no": rcept_no,
-        }
-        if current is None or report_date > current["report_date"]:
-            entries_by_key[key] = entry
-
-    entries = list(entries_by_key.values())
-    entries.sort(key=lambda item: item["report_date"], reverse=True)
-    return entries
 
 
 class DartProvider:
