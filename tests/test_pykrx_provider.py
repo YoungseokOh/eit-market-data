@@ -68,6 +68,41 @@ def test_fetch_benchmark_tr_uses_explicit_index_override(monkeypatch) -> None:
     assert [bar.close for bar in bars] == [2540.0]
 
 
+def test_fetch_benchmark_tr_uses_etf_stock_path(monkeypatch) -> None:
+    # KODEX 200 TR (ETF) must be fetched via the stock-OHLCV path, not the index
+    # path, and take precedence over any index resolution.
+    provider = PykrxProvider(benchmark_index="1001", benchmark_tr_etf="278530")
+    frame = pd.DataFrame(
+        {
+            "시가": [36000.0],
+            "고가": [36600.0],
+            "저가": [35900.0],
+            "종가": [36550.0],
+            "거래량": [1000.0],
+        },
+        index=pd.to_datetime(["2026-04-29"]),
+    )
+    seen: dict[str, str] = {}
+
+    def fake_stock(ticker, start, end, logger_=None):  # noqa: ANN001, ANN202
+        seen["ticker"] = ticker
+        return frame, "pykrx"
+
+    monkeypatch.setattr(
+        "eit_market_data.kr.pykrx_provider.fetch_stock_ohlcv_frame", fake_stock
+    )
+
+    def _boom(*a, **k):  # noqa: ANN002, ANN003, ANN202
+        raise AssertionError("index path must not be used when TR ETF is set")
+
+    monkeypatch.setattr("eit_market_data.kr.pykrx_provider.fetch_index_ohlcv_frame", _boom)
+    monkeypatch.setattr("eit_market_data.kr.pykrx_provider.resolve_tr_index_code", _boom)
+
+    bars = provider._fetch_benchmark_tr_sync(date(2026, 4, 29), lookback_days=10)
+    assert seen["ticker"] == "278530"
+    assert [bar.close for bar in bars] == [36550.0]
+
+
 def test_fetch_benchmark_tr_returns_empty_when_code_unresolved(monkeypatch) -> None:
     provider = PykrxProvider(benchmark_index="1001")
     monkeypatch.setattr(

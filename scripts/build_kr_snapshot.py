@@ -42,6 +42,7 @@ async def build_snapshot(
     market_subdir: str = "",
     dart_mode: str = "live",
     benchmark_index: str = "1001",
+    benchmark_tr_etf: str | None = None,
 ) -> dict[str, object]:
     from eit_market_data.snapshot import SnapshotBuilder, SnapshotConfig, create_kr_providers
 
@@ -66,6 +67,7 @@ async def build_snapshot(
             universe_csv=universe_csv,
             dart_override=dart_override,
             benchmark_index=benchmark_index,
+            benchmark_tr_etf=benchmark_tr_etf,
         )
     )
     snapshot = await builder.build_and_persist(
@@ -212,6 +214,12 @@ def main() -> None:
         help="DART source. cache_only replays the offline disk cache without any "
         "OpenDART network calls (point-in-time enforced per record).",
     )
+    parser.add_argument(
+        "--benchmark-tr-etf",
+        default="278530",
+        help="Accumulating TR ETF ticker for benchmark_tr_prices (default 278530 = "
+        "KODEX 200 TR). Pass '' to disable the TR benchmark for this build.",
+    )
     args = parser.parse_args()
 
     as_of = date.fromisoformat(args.as_of)
@@ -236,7 +244,13 @@ def main() -> None:
 
     summary = asyncio.run(
         build_snapshot(
-            as_of, universe_csv, artifacts_root, args.profile, args.market_subdir, args.dart_mode
+            as_of,
+            universe_csv,
+            artifacts_root,
+            args.profile,
+            args.market_subdir,
+            args.dart_mode,
+            benchmark_tr_etf=(args.benchmark_tr_etf or None),
         )
     )
     print(

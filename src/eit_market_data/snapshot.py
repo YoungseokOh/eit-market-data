@@ -100,6 +100,7 @@ def create_kr_providers(
     universe_csv: str | Path | None = None,
     dart_override: Any | None = None,
     benchmark_index: str = "1001",
+    benchmark_tr_etf: str | None = None,
 ) -> dict:
     """Create Korean market data providers.
 
@@ -155,7 +156,11 @@ def create_kr_providers(
             "benchmark_provider": FdrBenchmarkProvider(),
         }
 
-    pykrx = PykrxProvider(official_only=True, benchmark_index=benchmark_index)
+    pykrx = PykrxProvider(
+        official_only=True,
+        benchmark_index=benchmark_index,
+        benchmark_tr_etf=benchmark_tr_etf,
+    )
     fundamentals = CompositeKrFundamentalProvider(dart_provider=dart, price_provider=pykrx)
     pykrx._fundamental_provider = fundamentals
     return {

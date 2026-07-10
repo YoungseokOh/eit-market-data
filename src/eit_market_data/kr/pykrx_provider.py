@@ -54,6 +54,7 @@ class PykrxProvider:
         official_only: bool = True,
         benchmark_index: str = "1001",
         benchmark_tr_index: str | None = None,
+        benchmark_tr_etf: str | None = None,
     ) -> None:
         self._fundamental_provider = fundamental_provider
         self._fundamental_provider_init_failed = False
@@ -64,6 +65,11 @@ class PykrxProvider:
         # Explicit total-return index code override. When None, fetch_benchmark_tr
         # resolves the TR sibling of ``benchmark_index`` by name at runtime.
         self._benchmark_tr_index = benchmark_tr_index
+        # Total-return ETF ticker (e.g. "278530" KODEX 200 TR). pykrx does not
+        # expose native KR TR indices, so an accumulating TR ETF's adjusted price
+        # is used as the TR benchmark. Fetched via the stock-OHLCV path (not the
+        # index path). Takes precedence over benchmark_tr_index when set.
+        self._benchmark_tr_etf = benchmark_tr_etf
         self._sector_cache: dict[tuple[str, str], str] = {}
         self._logged_sector_snapshots: set[tuple[str, str]] = set()
         self._semaphore = asyncio.Semaphore(2)
@@ -273,16 +279,27 @@ class PykrxProvider:
             return []
 
     def _fetch_benchmark_tr_sync(self, as_of: date, lookback_days: int) -> list[PriceBar]:
+        start = as_of - timedelta(days=max(int(lookback_days * 1.8), 30))
+        # Preferred KR TR source: an accumulating TR ETF's adjusted price via the
+        # stock-OHLCV path (pykrx exposes no native KR TR index).
+        if self._benchmark_tr_etf:
+            df, _source = fetch_stock_ohlcv_frame(
+                _normalize_ticker(self._benchmark_tr_etf),
+                start,
+                as_of,
+                logger_=logger,
+            )
+            return price_bars_from_frame(df, as_of, lookback_days)
+
         tr_index = self._benchmark_tr_index or resolve_tr_index_code(
             as_of, self._benchmark_index, logger_=logger
         )
         if not tr_index:
             logger.warning(
-                "No TR index resolvable for base %s; leaving benchmark_tr_prices empty",
+                "No TR index/ETF resolvable for base %s; leaving benchmark_tr_prices empty",
                 self._benchmark_index,
             )
             return []
-        start = as_of - timedelta(days=max(int(lookback_days * 1.8), 30))
         df, _source = fetch_index_ohlcv_frame(
             tr_index,
             start,
