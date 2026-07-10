@@ -24,7 +24,7 @@ from eit_market_data.core.calendar import (
 )
 from eit_market_data.core.hashing import _content_hash
 from eit_market_data.synthetic import SyntheticProvider
-from eit_market_data.schemas.snapshot import MonthlySnapshot, SnapshotMetadata
+from eit_market_data.schemas.snapshot import MonthlySnapshot, PriceBar, SnapshotMetadata
 
 MONTHLY_SNAPSHOT_FILENAME = "snapshot.json"
 logger = logging.getLogger(__name__)
@@ -180,6 +180,11 @@ def serialize_snapshot(snapshot: MonthlySnapshot) -> dict[str, object]:
     exclude: dict[str, object] = {}
     if not snapshot.news:
         exclude["news"] = True
+    # Omit the TR benchmark when unfetched so bundles that don't carry it stay
+    # byte-identical to their pre-TR serialization (contract: existing values
+    # immutable). Present only when the build actually populated it.
+    if not snapshot.benchmark_tr_prices:
+        exclude["benchmark_tr_prices"] = True
 
     metadata_exclude: dict[str, bool] = {}
     if not snapshot.metadata.news_hash:
@@ -281,6 +286,16 @@ class SnapshotBuilder:
         macro_task = self.macro.fetch_macro(decision_date)
         sector_map_task = self.sector.fetch_sector_map(universe, as_of=decision_date)
         benchmark_task = self.benchmark.fetch_benchmark(decision_date)
+        # TR benchmark is optional: only providers that implement fetch_benchmark_tr
+        # (yfinance ^SP500TR, pykrx KR TR index) supply it; others yield [].
+        benchmark_tr_fetch = getattr(self.benchmark, "fetch_benchmark_tr", None)
+
+        async def _benchmark_tr() -> list[PriceBar]:
+            if benchmark_tr_fetch is None:
+                return []
+            return await benchmark_tr_fetch(decision_date)
+
+        benchmark_tr_task = _benchmark_tr()
 
         # Gather price / fundamental / filing all in parallel.
         # FdrNaverPriceProvider caches by (ticker, as_of), so fund_tasks and
@@ -296,8 +311,8 @@ class SnapshotBuilder:
         all_funds = list(all_stock_results[n : 2 * n])
         all_filings = list(all_stock_results[2 * n :])
 
-        macro, sector_map, benchmark_prices = await asyncio.gather(
-            macro_task, sector_map_task, benchmark_task
+        macro, sector_map, benchmark_prices, benchmark_tr_prices = await asyncio.gather(
+            macro_task, sector_map_task, benchmark_task, benchmark_tr_task
         )
 
         prices = dict(zip(price_tasks.keys(), all_prices, strict=True))
@@ -349,6 +364,7 @@ class SnapshotBuilder:
             sector_map=sector_map,
             sector_averages=sector_averages,
             benchmark_prices=benchmark_prices,
+            benchmark_tr_prices=benchmark_tr_prices,
             input_hash=input_hash,
             metadata=metadata,
         )

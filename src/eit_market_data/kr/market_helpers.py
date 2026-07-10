@@ -184,6 +184,68 @@ def fetch_stock_ohlcv_frame(
     return None, ""
 
 
+# Total-return sibling name for each price-return benchmark index. KRX assigns
+# the TR index a different numeric code than its price index; we resolve that
+# code by exact name at runtime (below) rather than hardcoding a number that
+# cannot be verified offline.
+_TR_INDEX_NAME_BY_BASE: dict[str, str] = {
+    "1001": "코스피 TR",
+    "1028": "코스피 200 TR",
+    "5042": "KRX 300 TR",
+}
+_tr_index_code_cache: dict[str, str | None] = {}
+
+
+def resolve_tr_index_code(
+    as_of: date,
+    base_index: str,
+    logger_: logging.Logger | None = None,
+) -> str | None:
+    """Resolve the KRX total-return index code paired with ``base_index``.
+
+    Scans the pykrx index listing for the TR sibling by its exact display name
+    (e.g. ``"코스피 200 TR"`` for base ``"1028"``). Returns ``None`` when the base
+    index has no known TR sibling or the listing cannot be read. Cached per base
+    index (codes are stable over time).
+    """
+    active_logger = logger_ or logger
+    if base_index in _tr_index_code_cache:
+        return _tr_index_code_cache[base_index]
+
+    target = _TR_INDEX_NAME_BY_BASE.get(base_index)
+    code: str | None = None
+    if target is not None:
+        want = target.replace(" ", "")
+        try:
+            from eit_market_data.kr.pykrx_loader import load_pykrx_stock
+
+            stock = load_pykrx_stock()
+            install_pykrx_krx_session_hooks()
+            ensure_krx_authenticated_session(interactive=False)
+            as_of_str = date_to_yyyymmdd(as_of)
+            for group in ("KOSPI", "KRX", "KOSDAQ"):
+                try:
+                    codes = stock.get_index_ticker_list(as_of_str, market=group)
+                except TypeError:
+                    codes = stock.get_index_ticker_list(as_of_str)
+                for candidate in codes or []:
+                    try:
+                        name = str(stock.get_index_ticker_name(candidate))
+                    except Exception:
+                        continue
+                    if name.replace(" ", "") == want:
+                        code = str(candidate)
+                        break
+                if code is not None:
+                    break
+        except Exception as exc:
+            active_logger.warning("TR index code resolution failed for %s: %s", base_index, exc)
+            code = None
+
+    _tr_index_code_cache[base_index] = code
+    return code
+
+
 def _fetch_index_ohlcv_frame_pykrx(
     index_code: str,
     start: date,

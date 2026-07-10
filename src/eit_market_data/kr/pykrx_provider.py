@@ -16,6 +16,7 @@ from eit_market_data.kr.market_helpers import (
     normalize_ticker,
     fetch_market_cap_frame,
     fetch_market_ticker_list,
+    resolve_tr_index_code,
 )
 from eit_market_data.core.price_frame import price_bars_from_frame
 from eit_market_data.core.sector_math import compute_sector_averages
@@ -52,6 +53,7 @@ class PykrxProvider:
         fundamental_provider: Any | None = None,
         official_only: bool = True,
         benchmark_index: str = "1001",
+        benchmark_tr_index: str | None = None,
     ) -> None:
         self._fundamental_provider = fundamental_provider
         self._fundamental_provider_init_failed = False
@@ -59,6 +61,9 @@ class PykrxProvider:
         # Benchmark index code. "1001"=KOSPI (default), "5042"=KRX300 (KOSPI+KOSDAQ
         # spanning — appropriate for a combined KOSPI+KOSDAQ universe).
         self._benchmark_index = benchmark_index
+        # Explicit total-return index code override. When None, fetch_benchmark_tr
+        # resolves the TR sibling of ``benchmark_index`` by name at runtime.
+        self._benchmark_tr_index = benchmark_tr_index
         self._sector_cache: dict[tuple[str, str], str] = {}
         self._logged_sector_snapshots: set[tuple[str, str]] = set()
         self._semaphore = asyncio.Semaphore(2)
@@ -239,6 +244,47 @@ class PykrxProvider:
         start = as_of - timedelta(days=max(int(lookback_days * 1.8), 30))
         df, _source = fetch_index_ohlcv_frame(
             self._benchmark_index,
+            start,
+            as_of,
+            logger_=logger,
+            official_only=self._official_only,
+        )
+        return price_bars_from_frame(df, as_of, lookback_days)
+
+    async def fetch_benchmark_tr(
+        self, as_of: date, lookback_days: int = 300
+    ) -> list[PriceBar]:
+        """Fetch the total-return sibling of the configured benchmark index.
+
+        Dividends reinvested (e.g. 코스피 200 TR / KRX 300 TR), so long-only excess
+        return is measured on a total-return basis. Best-effort: returns [] when
+        the TR index code cannot be resolved rather than raising.
+        """
+        try:
+            return await self._run_limited(
+                self._fetch_benchmark_tr_sync, as_of, lookback_days
+            )
+        except KrxAuthRequired:
+            if self._official_only:
+                raise
+            return []
+        except Exception as e:
+            logger.warning("KR TR benchmark fetch failed: %s", e)
+            return []
+
+    def _fetch_benchmark_tr_sync(self, as_of: date, lookback_days: int) -> list[PriceBar]:
+        tr_index = self._benchmark_tr_index or resolve_tr_index_code(
+            as_of, self._benchmark_index, logger_=logger
+        )
+        if not tr_index:
+            logger.warning(
+                "No TR index resolvable for base %s; leaving benchmark_tr_prices empty",
+                self._benchmark_index,
+            )
+            return []
+        start = as_of - timedelta(days=max(int(lookback_days * 1.8), 30))
+        df, _source = fetch_index_ohlcv_frame(
+            tr_index,
             start,
             as_of,
             logger_=logger,

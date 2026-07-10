@@ -270,5 +270,9 @@ class MonthlySnapshot(BaseModel):
         default_factory=dict, description="{sector_name: SectorAverages}"
     )
     benchmark_prices: list[PriceBar] = Field(default_factory=list)
+    # Total-return benchmark (dividends reinvested) — kept separate from the
+    # price-return ``benchmark_prices`` so existing values stay immutable. Empty
+    # unless the build fetched a TR index (US ^SP500TR, KR KOSPI200/KRX300 TR).
+    benchmark_tr_prices: list[PriceBar] = Field(default_factory=list)
     input_hash: str = ""
     metadata: SnapshotMetadata = Field(default_factory=SnapshotMetadata)

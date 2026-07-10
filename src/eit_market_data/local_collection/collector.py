@@ -288,6 +288,7 @@ class LocalKrCollector:
 
         macro = await self.macro_provider.fetch_macro(self.as_of)
         benchmark_prices = await self.pykrx.fetch_benchmark(self.as_of)
+        benchmark_tr_prices = await self.pykrx.fetch_benchmark_tr(self.as_of)
         sector_averages = compute_sector_averages_from_state(sector_map, state.fundamentals)
 
         snapshot = self._build_snapshot(
@@ -297,6 +298,7 @@ class LocalKrCollector:
             sector_averages=sector_averages,
             macro=macro,
             benchmark_prices=benchmark_prices,
+            benchmark_tr_prices=benchmark_tr_prices,
         )
         summary = self._persist_snapshot(snapshot, state)
         final_checks = validate_kr_final_snapshot(
@@ -352,6 +354,7 @@ class LocalKrCollector:
         sector_averages: dict[str, SectorAverages],
         macro: MacroData,
         benchmark_prices: list[PriceBar],
+        benchmark_tr_prices: list[PriceBar] | None = None,
     ) -> MonthlySnapshot:
         execution_date = _next_kr_execution_date(self.as_of)
 
@@ -380,6 +383,7 @@ class LocalKrCollector:
             sector_map=sector_map,
             sector_averages=sector_averages,
             benchmark_prices=benchmark_prices,
+            benchmark_tr_prices=benchmark_tr_prices or [],
             input_hash=_content_hash({"decision_date": self.as_of.isoformat(), "universe": tickers}),
             metadata=metadata,
         )

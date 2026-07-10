@@ -557,8 +557,20 @@ class YFinanceProvider:
     async def fetch_benchmark(
         self, as_of: date, lookback_days: int = 300
     ) -> list[PriceBar]:
-        """Fetch S&P 500 (^GSPC) prices as benchmark."""
+        """Fetch S&P 500 (^GSPC) price-return prices as benchmark."""
         return await self.fetch_prices("^GSPC", as_of, lookback_days)
+
+    async def fetch_benchmark_tr(
+        self, as_of: date, lookback_days: int = 300
+    ) -> list[PriceBar]:
+        """Fetch S&P 500 total-return index (^SP500TR), dividends reinvested.
+
+        Matches the dividend-reinvested basis of the individual US stock series
+        (fetched with ``auto_adjust=True``), so long-only excess return vs this
+        benchmark is not overstated by the ~1.5-2%/yr dividend yield that the
+        price-return ^GSPC benchmark omits.
+        """
+        return await self.fetch_prices("^SP500TR", as_of, lookback_days)
 
     # ------------------------------------------------------------------
     # FilingProvider stub (SEC EDGAR is separate)

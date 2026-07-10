@@ -76,6 +76,87 @@ class _AsOfRecorderProvider:
         return [PriceBar(date=as_of, open=1, high=1, low=1, close=1, volume=1)]
 
 
+class _TrBenchmarkProvider(_AsOfRecorderProvider):
+    async def fetch_benchmark_tr(
+        self,
+        as_of: date,
+        lookback_days: int = 300,
+    ) -> list[PriceBar]:
+        _ = lookback_days
+        return [PriceBar(date=as_of, open=2, high=2, low=2, close=2, volume=2)]
+
+
+def test_snapshot_builder_populates_tr_benchmark_when_provider_supports_it() -> None:
+    provider = _TrBenchmarkProvider()
+    builder = SnapshotBuilder(
+        price_provider=provider,
+        fundamental_provider=provider,
+        filing_provider=provider,
+        macro_provider=provider,
+        sector_provider=provider,
+        benchmark_provider=provider,
+    )
+
+    snapshot = asyncio.run(
+        builder.build("2026-05", ["005930"], decision_date=date(2026, 5, 4))
+    )
+
+    assert [bar.close for bar in snapshot.benchmark_tr_prices] == [2]
+
+
+def test_snapshot_builder_leaves_tr_benchmark_empty_without_provider_support() -> None:
+    # _AsOfRecorderProvider has no fetch_benchmark_tr → optional path yields [].
+    provider = _AsOfRecorderProvider()
+    builder = SnapshotBuilder(
+        price_provider=provider,
+        fundamental_provider=provider,
+        filing_provider=provider,
+        macro_provider=provider,
+        sector_provider=provider,
+        benchmark_provider=provider,
+    )
+
+    snapshot = asyncio.run(
+        builder.build("2026-05", ["005930"], decision_date=date(2026, 5, 4))
+    )
+
+    assert snapshot.benchmark_tr_prices == []
+
+
+def test_serialize_snapshot_omits_empty_tr_benchmark_but_keeps_populated() -> None:
+    from eit_market_data.snapshot import serialize_snapshot
+
+    base = _AsOfRecorderProvider()
+    builder = SnapshotBuilder(
+        price_provider=base,
+        fundamental_provider=base,
+        filing_provider=base,
+        macro_provider=base,
+        sector_provider=base,
+        benchmark_provider=base,
+    )
+    snap_empty = asyncio.run(
+        builder.build("2026-05", ["005930"], decision_date=date(2026, 5, 4))
+    )
+    assert "benchmark_tr_prices" not in serialize_snapshot(snap_empty)
+
+    tr = _TrBenchmarkProvider()
+    builder_tr = SnapshotBuilder(
+        price_provider=tr,
+        fundamental_provider=tr,
+        filing_provider=tr,
+        macro_provider=tr,
+        sector_provider=tr,
+        benchmark_provider=tr,
+    )
+    snap_tr = asyncio.run(
+        builder_tr.build("2026-05", ["005930"], decision_date=date(2026, 5, 4))
+    )
+    serialized = serialize_snapshot(snap_tr)
+    assert "benchmark_tr_prices" in serialized
+    assert len(serialized["benchmark_tr_prices"]) == 1
+
+
 def test_snapshot_builder_accepts_partial_month_decision_date() -> None:
     provider = _AsOfRecorderProvider()
     builder = SnapshotBuilder(

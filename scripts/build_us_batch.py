@@ -373,6 +373,7 @@ async def _build_chunked_snapshot(
         sector_map=merged.sector_map,
         sector_averages=sector_averages,
         benchmark_prices=merged.benchmark_prices,
+        benchmark_tr_prices=merged.benchmark_tr_prices,
         input_hash=_content_hash(
             {"decision_date": str(merged.decision_date), "universe": sorted(merged.universe)}
         ),
@@ -428,6 +429,7 @@ def _merge_snapshots(snaps: list[MonthlySnapshot]) -> MonthlySnapshot:
         sector_map=sector_map,
         sector_averages=sector_averages,
         benchmark_prices=first.benchmark_prices,
+        benchmark_tr_prices=first.benchmark_tr_prices,
         input_hash=_content_hash({"decision_date": str(first.decision_date), "universe": sorted(universe)}),
         metadata=metadata,
     )
