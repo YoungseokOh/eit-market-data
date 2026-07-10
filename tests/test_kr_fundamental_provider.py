@@ -150,6 +150,48 @@ def test_composite_provider_merges_market_snapshot_fields() -> None:
     assert fundamentals.quarters[0].issued_shares == 6430000.0
 
 
+def test_composite_provider_attaches_dps_to_latest_quarter_only() -> None:
+    provider = object.__new__(CompositeKrFundamentalProvider)
+    fundamentals = provider._merge_fundamentals(
+        FundamentalData(
+            ticker="005930",
+            quarters=[
+                QuarterlyFinancials(fiscal_quarter="2024Q4", report_date=date(2025, 3, 10)),
+                QuarterlyFinancials(fiscal_quarter="2024Q3", report_date=date(2024, 11, 14)),
+            ],
+        ),
+        {"last_close_price": None, "market_cap": None, "issued_shares": None},
+        None,
+        {"dividends_per_share": 1444.0},
+    )
+
+    # Annual DPS lands on the newest quarter only; older quarters stay unset so
+    # it is not misread as a per-quarter dividend.
+    assert fundamentals.quarters[0].dividends_per_share == 1444.0
+    assert fundamentals.quarters[1].dividends_per_share is None
+
+
+def test_composite_provider_does_not_overwrite_existing_dps() -> None:
+    provider = object.__new__(CompositeKrFundamentalProvider)
+    fundamentals = provider._merge_fundamentals(
+        FundamentalData(
+            ticker="005930",
+            quarters=[
+                QuarterlyFinancials(
+                    fiscal_quarter="2024Q4",
+                    report_date=date(2025, 3, 10),
+                    dividends_per_share=1500.0,
+                )
+            ],
+        ),
+        {"last_close_price": None, "market_cap": None, "issued_shares": None},
+        None,
+        {"dividends_per_share": 1444.0},
+    )
+
+    assert fundamentals.quarters[0].dividends_per_share == 1500.0
+
+
 def test_composite_provider_uses_price_snapshot_when_market_price_missing() -> None:
     provider = object.__new__(CompositeKrFundamentalProvider)
     fundamentals = provider._merge_fundamentals(

@@ -15,6 +15,7 @@ from typing import Any
 from eit_market_data.kr.market_helpers import (
     date_to_yyyymmdd,
     fetch_market_cap_frame,
+    fetch_market_fundamental_frame,
     normalize_ticker,
 )
 from eit_market_data.schemas.snapshot import FundamentalData
@@ -44,6 +45,9 @@ class CompositeKrFundamentalProvider:
         self._raise_on_error = raise_on_error
         self._market_cap_cache: dict[str, Any] = {}
         self._market_cap_cache_lock = threading.Lock()
+        # Per-date KRX market-fundamental frame cache (carries the DPS column).
+        self._dps_frame_cache: dict[str, Any] = {}
+        self._dps_frame_cache_lock = threading.Lock()
         self._semaphore = asyncio.Semaphore(16)
         # Cache final FundamentalData by (ticker, as_of) so sector_avg_tasks
         # that call fetch_fundamentals() a second time get instant hits.
@@ -71,11 +75,15 @@ class CompositeKrFundamentalProvider:
             )
             market_task = asyncio.create_task(self._fetch_market_snapshot(norm_ticker, as_of))
             price_task = asyncio.create_task(self._fetch_price_snapshot(norm_ticker, as_of))
+            dps_task = asyncio.create_task(self._fetch_dps_snapshot(norm_ticker, as_of))
             try:
-                dart_fundamentals, market_snapshot, price_snapshot = await asyncio.gather(
-                    dart_task,
-                    market_task,
-                    price_task,
+                dart_fundamentals, market_snapshot, price_snapshot, dps_snapshot = (
+                    await asyncio.gather(
+                        dart_task,
+                        market_task,
+                        price_task,
+                        dps_task,
+                    )
                 )
             except Exception as e:
                 logger.warning(
@@ -98,7 +106,9 @@ class CompositeKrFundamentalProvider:
                     if market_snapshot.get("market_cap") is None and last_close:
                         market_snapshot["market_cap"] = float(last_close) * issued_shares
 
-        result = self._merge_fundamentals(dart_fundamentals, market_snapshot, price_snapshot)
+        result = self._merge_fundamentals(
+            dart_fundamentals, market_snapshot, price_snapshot, dps_snapshot
+        )
         self._fundamentals_cache[key] = result
         return result
 
@@ -124,6 +134,69 @@ class CompositeKrFundamentalProvider:
         if not bars:
             return {"last_close_price": None}
         return {"last_close_price": bars[-1].close}
+
+    async def _fetch_dps_snapshot(self, ticker: str, as_of: date) -> dict[str, float | None]:
+        """PIT annual cash dividend-per-share from the KRX market-fundamental snapshot.
+
+        pykrx ``get_market_fundamental(date, market)`` exposes a ``DPS`` column —
+        the trailing annual cash dividend per share reflected in the DIV yield as
+        of ``date``. Reading it at ``as_of`` is point-in-time safe (it is the
+        value published/known on that date). Best-effort: a missing/failed KRX
+        snapshot yields ``None`` rather than raising, since DPS is additive.
+        """
+        if not self._use_market_snapshot:
+            return {"dividends_per_share": None}
+        return await asyncio.to_thread(self._fetch_dps_snapshot_sync, ticker, as_of)
+
+    def _fetch_dps_snapshot_sync(self, ticker: str, as_of: date) -> dict[str, float | None]:
+        effective_as_of = min(as_of, date.today())
+        frame = self._market_fundamental_frame(effective_as_of)
+        if frame is None or ticker not in frame.index:
+            return {"dividends_per_share": None}
+        try:
+            dps_val = frame.loc[ticker, "DPS"]
+            # A duplicate ticker across KOSPI/KOSDAQ frames yields a Series; take
+            # the first finite value.
+            if hasattr(dps_val, "iloc"):
+                dps_val = next((v for v in dps_val if v is not None), None)
+            dps = float(dps_val) if dps_val is not None else None
+        except Exception:
+            return {"dividends_per_share": None}
+        # DPS 0 means "no cash dividend for the trailing year" — a real datum, not
+        # missing — but store None so a genuine zero is not confused downstream
+        # with a paid dividend; the consumer treats absent DPS as no dividend.
+        return {"dividends_per_share": dps if dps and dps > 0 else None}
+
+    def _market_fundamental_frame(self, trade_date: date):  # noqa: ANN202
+        cache_key = date_to_yyyymmdd(trade_date)
+        with self._dps_frame_cache_lock:
+            if cache_key in self._dps_frame_cache:
+                return self._dps_frame_cache[cache_key]
+            frames: list[Any] = []
+            for market in ("KOSPI", "KOSDAQ"):
+                try:
+                    frame = fetch_market_fundamental_frame(trade_date, market)
+                except Exception as exc:
+                    logger.warning(
+                        "KR market-fundamental (DPS) fetch failed for %s: %s", market, exc
+                    )
+                    frame = None
+                if frame is None or frame.empty or "DPS" not in frame.columns:
+                    continue
+                normalized = frame.copy()
+                normalized.index = normalized.index.map(lambda value: normalize_ticker(str(value)))
+                frames.append(normalized)
+            result = None
+            if frames:
+                try:
+                    import pandas as pd
+
+                    result = pd.concat(frames)
+                    result = result[~result.index.duplicated(keep="first")]
+                except Exception:
+                    result = frames[0]
+            self._dps_frame_cache[cache_key] = result
+            return result
 
     def _fetch_market_snapshot_sync(self, ticker: str, as_of: date) -> dict[str, float | None]:
         # Market-cap snapshots are month/day keyed already, so use the snapshot
@@ -222,6 +295,7 @@ class CompositeKrFundamentalProvider:
         dart_fundamentals: FundamentalData,
         market_snapshot: dict[str, float | None],
         price_snapshot: dict[str, float | None] | None = None,
+        dps_snapshot: dict[str, float | None] | None = None,
     ) -> FundamentalData:
         issued_shares = market_snapshot.get("issued_shares")
         quarters = dart_fundamentals.quarters
@@ -251,6 +325,17 @@ class CompositeKrFundamentalProvider:
                 else:
                     updated_quarters.append(quarter)
             quarters = updated_quarters
+
+        # Attach the PIT annual cash DPS to the most recent visible quarter only.
+        # DART quarters arrive sorted newest-first; the annual figure belongs to
+        # the latest report, and filling every quarter would misread as a
+        # per-quarter dividend. Additive: only set when currently unpopulated.
+        dps = (dps_snapshot or {}).get("dividends_per_share")
+        if dps is not None and quarters and quarters[0].dividends_per_share is None:
+            quarters = [
+                quarters[0].model_copy(update={"dividends_per_share": dps}),
+                *quarters[1:],
+            ]
 
         return dart_fundamentals.model_copy(
             update={
