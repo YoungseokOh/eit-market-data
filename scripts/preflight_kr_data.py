@@ -157,7 +157,11 @@ async def _check_market_stack(as_of: date, ticker: str) -> list[CheckResult]:
     try:
         cap_frame = fetch_market_cap_frame(as_of, "KOSPI")
     except Exception as exc:
-        results.append(CheckResult("public:market-cap", "failed", str(exc)))
+        # KRX periodically changes its anonymous/download authentication flow.
+        # Market-cap enrichment is optional for the daily macro/price snapshot;
+        # prices, benchmark, DART and ECOS remain independently validated below.
+        # Report the loss explicitly, but do not suppress every downstream feed.
+        results.append(CheckResult("public:market-cap", "degraded", str(exc)))
     else:
         if cap_frame is not None and not cap_frame.empty:
             results.append(
